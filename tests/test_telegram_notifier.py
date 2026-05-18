@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -303,6 +304,7 @@ def test_cycle_report_includes_extra_performance_metrics(monkeypatch):
     assert "GHPR `" in sent["message"]
     assert "CAGR `" in sent["message"]
     assert "MAR `" in sent["message"]
+    assert re.search(r"MAR `-?\d+\.\d`", sent["message"]) is not None
     assert "Sharpe `" in sent["message"]
     assert "Sortino `" in sent["message"]
     assert "Avg W `" in sent["message"]

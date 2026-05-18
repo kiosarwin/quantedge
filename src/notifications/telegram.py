@@ -382,7 +382,7 @@ class TelegramNotifier:
         )
         perf_lines = [
             f"PF `{perf['profit_factor']:.2f}`  WR `{perf['win_rate']:.1%}`  Z-Score `{perf['z_score']:+.2f}`  GHPR `{perf['ghpr_pct']:+.2f}%/trade`",
-            f"CAGR `{perf['cagr_pct']:+.1f}%`  MAR `{perf['mar']:.2f}`  Sharpe `{perf['sharpe']:.2f}`  Sortino `{perf['sortino']:.2f}`",
+            f"CAGR `{perf['cagr_pct']:+.1f}%`  MAR `{perf['mar']:.1f}`  Sharpe `{perf['sharpe']:.2f}`  Sortino `{perf['sortino']:.2f}`",
             f"Avg W `{perf['avg_win_pct']:+.2f}%`  Avg L `{perf['avg_loss_pct']:+.2f}%`  Avg W/L `{perf['avg_wl']:.2f}`  Exp `{perf['expectancy_pct']:+.2f}%`",
             f"Recovery `{perf['recovery_factor']:.2f}`  MaxDD `{perf['max_dd_pct']:.1f}%`  Trades `{perf['trades']}`",
         ]
