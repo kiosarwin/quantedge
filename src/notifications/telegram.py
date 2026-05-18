@@ -286,6 +286,20 @@ class TelegramNotifier:
         import datetime
         now = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S UTC")
         active_session = self._active_session_label()
+        equity = self._safe_float(equity)
+        drawdown_pct = self._safe_float(drawdown_pct)
+        daily_pnl_pct = self._safe_float(daily_pnl_pct)
+        open_trades = self._safe_int(open_trades)
+        cycle_num = self._safe_int(cycle_num)
+        ml_accuracy = self._safe_float(ml_accuracy)
+        paper_trades = self._safe_int(paper_trades)
+        consecutive_wins = self._safe_int(consecutive_wins)
+        consecutive_losses = self._safe_int(consecutive_losses)
+        fm_scale = self._safe_float(fm_scale, 1.0)
+        win_rate = self._safe_float(win_rate)
+        sharpe = self._safe_float(sharpe)
+        total_trades = self._safe_int(total_trades)
+        starting_equity = self._safe_float(starting_equity)
 
         pnl_emoji = "📈" if daily_pnl_pct >= 0 else "📉"
         dd_emoji  = "🔴" if drawdown_pct > 8 else "🟡" if drawdown_pct > 3 else "🟢"
@@ -350,7 +364,10 @@ class TelegramNotifier:
         else:
             bonus_line = f"Jim's Bonus: `+0.00x` — earn it by winning"
 
-        floating_total = sum(p["pnl_usd"] for p in floating_positions) if floating_positions else 0.0
+        floating_total = sum(
+            self._safe_float(p.get("pnl_usd", 0.0))
+            for p in (floating_positions or [])
+        )
         balance = self._safe_float(equity)
         effective_equity = equity + floating_total
         total_pnl_usd = effective_equity - starting_equity if starting_equity > 0 else 0.0
@@ -394,27 +411,31 @@ class TelegramNotifier:
         lines.append(f"🗂️ *Open Positions:*")
         position_rows = floating_positions or open_positions or []
         if position_rows:
-            total_float = sum(float(p.get("pnl_usd", 0.0)) for p in position_rows if p.get("pnl_usd") is not None)
+            total_float = sum(
+                self._safe_float(p.get("pnl_usd", 0.0))
+                for p in position_rows
+            )
             for p in position_rows:
-                d_emoji = "📈" if p["direction"] == "long" else "📉"
-                pnl_usd = float(p.get("pnl_usd", 0.0))
-                pnl_pct = float(p.get("pnl_pct", 0.0))
+                direction = str(p.get("direction", "") or "").lower()
+                d_emoji = "📈" if direction == "long" else "📉" if direction == "short" else "📍"
+                pnl_usd = self._safe_float(p.get("pnl_usd", 0.0))
+                pnl_pct = self._safe_float(p.get("pnl_pct", 0.0))
                 sign = "+" if pnl_usd >= 0 else ""
                 color = "🟢" if pnl_usd >= 0 else "🔴"
-                elapsed_s = float(p.get("elapsed_s", time.time() - p.get("opened_at", time.time())))
+                elapsed_s = self._safe_float(p.get("elapsed_s", time.time() - p.get("opened_at", time.time())))
                 elapsed_m = int(elapsed_s // 60)
-                sym = p["symbol"].split(":")[0]
-                entry = float(p.get("entry", 0.0))
-                current = float(p.get("current", entry))
-                sl = float(p.get("sl", 0.0))
-                tp1 = float(p.get("tp1", 0.0))
-                risk_pct = float(p.get("risk_pct", 0.0))
-                risk_usd = float(p.get("risk_usd", 0.0))
-                size_usd = float(p.get("size_usd", 0.0))
+                sym = str(p.get("symbol", "?")).split(":")[0]
+                entry = self._safe_float(p.get("entry", 0.0))
+                current = self._safe_float(p.get("current", entry))
+                sl = self._safe_float(p.get("sl", 0.0))
+                tp1 = self._safe_float(p.get("tp1", 0.0))
+                risk_pct = self._safe_float(p.get("risk_pct", 0.0))
+                risk_usd = self._safe_float(p.get("risk_usd", 0.0))
+                size_usd = self._safe_float(p.get("size_usd", 0.0))
                 strategy = p.get("strategy_sleeve", "neutral")
                 exit_profile = p.get("exit_profile", "default")
                 lines.append(
-                    f"{color} {d_emoji} `{sym}` {p['direction'].upper()}\n"
+                    f"{color} {d_emoji} `{sym}` {direction.upper() or 'UNKNOWN'}\n"
                     f"  ${entry:,.4f} → ${current:,.4f}  "
                     f"({sign}{pnl_pct:+.2f}%)  {sign}${pnl_usd:.2f}  |  {elapsed_m}m\n"
                     f"  SL `${sl:,.4f}`  TP1 `${tp1:,.4f}`  Size `${size_usd:,.2f}`\n"
@@ -672,15 +693,24 @@ class TelegramNotifier:
     async def monthly_report(self, report: dict) -> None:
         if not self._enabled or report.get("trades", 0) == 0:
             return
-        mode      = report.get("mode", "paper")
+        mode      = str(report.get("mode", "paper") or "paper")
         mode_lbl  = "🟢 LIVE" if mode == "live" else "📋 PAPER"
-        days      = report.get("monthly_days", 30)
-        sharpe    = report.get("sharpe", 0)
-        sortino   = report.get("sortino", 0)
-        calmar    = report.get("calmar", 0)
-        monthly_r = report.get("monthly_return_pct", 0)
-        pf        = report.get("profit_factor", 0)
+        days      = self._safe_float(report.get("monthly_days", 30), 30.0)
+        sharpe    = self._safe_float(report.get("sharpe", 0))
+        sortino   = self._safe_float(report.get("sortino", 0))
+        calmar    = self._safe_float(report.get("calmar", 0))
+        monthly_r = self._safe_float(report.get("monthly_return_pct", 0))
+        pf        = self._safe_float(report.get("profit_factor", 0))
         next_m    = report.get("next_milestone")
+        monthly_trades = self._safe_int(report.get("monthly_trades", 0))
+        equity = self._safe_float(report.get("equity", 0))
+        peak_equity = self._safe_float(report.get("peak_equity", 0))
+        win_rate = self._safe_float(report.get("win_rate", 0))
+        avg_rr = self._safe_float(report.get("avg_rr", 0))
+        drawdown_pct = self._safe_float(report.get("drawdown_pct", 0))
+        net_pnl = self._safe_float(report.get("net_pnl", 0))
+        best_trade = self._safe_float(report.get("best_trade", 0))
+        worst_trade = self._safe_float(report.get("worst_trade", 0))
 
         r_emoji = "📈" if monthly_r >= 0 else "📉"
 
@@ -700,20 +730,20 @@ class TelegramNotifier:
 
         await self._send(
             f"📋 *MONTHLY STATEMENT — {mode_lbl}*\n"
-            f"`Period: {days:.0f} days  |  {report['monthly_trades']} trades`\n"
+            f"`Period: {days:.0f} days  |  {monthly_trades} trades`\n"
             f"══════════════════════\n"
             f"{verdict}\n"
             f"──────────────────────\n"
-            f"💰 Equity: *${report['equity']:,.2f}*  (peak: `${report['peak_equity']:,.2f}`)\n"
+            f"💰 Equity: *${equity:,.2f}*  (peak: `${peak_equity:,.2f}`)\n"
             f"{r_emoji} Monthly Return: *{monthly_r:+.2f}%*\n"
             f"──────────────────────\n"
-            f"🏆 Win Rate: `{report['win_rate']:.1%}`\n"
+            f"🏆 Win Rate: `{win_rate:.1%}`\n"
             f"⚖️ Profit Factor: `{pf:.2f}` — {pf_note}\n"
-            f"📐 Avg R:R: `{report['avg_rr']:.2f}`\n"
-            f"📉 Max Drawdown: `{report['drawdown_pct']:.1f}%`\n"
-            f"💵 Net P&L: `${report['net_pnl']:+.2f}`\n"
-            f"🟢 Best trade: `+${report['best_trade']:.2f}`\n"
-            f"🔴 Worst trade: `${report['worst_trade']:.2f}`\n"
+            f"📐 Avg R:R: `{avg_rr:.2f}`\n"
+            f"📉 Max Drawdown: `{drawdown_pct:.1f}%`\n"
+            f"💵 Net P&L: `${net_pnl:+.2f}`\n"
+            f"🟢 Best trade: `+${best_trade:.2f}`\n"
+            f"🔴 Worst trade: `${worst_trade:.2f}`\n"
             f"──────────────────────\n"
             f"📊 Sharpe: `{sharpe:.2f}`  Sortino: `{sortino:.2f}`  Calmar: `{calmar:.2f}`"
             f"{next_line}\n"
@@ -752,13 +782,16 @@ class TelegramNotifier:
         kelly_label = "🔼 Scaling Up" if kelly_f > 1.05 else "🔽 Scaling Down" if kelly_f < 0.95 else "⚖️ Neutral"
         floating_total = sum(self._safe_float(p.get("pnl_usd", 0.0)) for p in floating_positions or [])
         balance = self._safe_float(equity)
-        effective_equity = self._safe_float(equity) + floating_total
+        effective_equity = balance + floating_total
 
         regime_lines = ""
-        for regime, s in report.get("regime_breakdown", {}).items():
+        for regime, s in (report.get("regime_breakdown") or {}).items():
             short = {"trending_expansion": "Trend", "accumulation_compression": "Accum",
                      "distribution": "Dist", "chaos": "Chaos"}.get(regime, regime)
-            regime_lines += f"\n   {short}: {s['win_rate']:.0%} WR  ({s['total']} trades)  ${s['pnl']:+.2f}"
+            regime_lines += (
+                f"\n   {short}: {self._safe_float(s.get('win_rate', 0)):.0%} WR"
+                f"  ({self._safe_int(s.get('total', 0))} trades)  ${self._safe_float(s.get('pnl', 0)):+.2f}"
+            )
 
         msg = (
             f"🧮 *JIM SIMONS — FUND MANAGER REPORT*\n"
@@ -783,11 +816,11 @@ class TelegramNotifier:
         if sleeve_rows:
             sleeve_lines = ""
             for row in sleeve_rows:
-                pf_val = row.get("profit_factor", 0.0)
+                pf_val = self._safe_float(row.get("profit_factor", 0.0))
                 pf_str = "inf" if pf_val == float("inf") else f"{pf_val:.2f}"
                 sleeve_lines += (
-                    f"\n   `{row['key']}`: {row['win_rate']:.0%} WR  "
-                    f"PF {pf_str}  ${row['net_pnl_usd']:+.2f}  ({row['trades']})"
+                    f"\n   `{row.get('key', '?')}`: {self._safe_float(row.get('win_rate', 0)):.0%} WR  "
+                    f"PF {pf_str}  ${self._safe_float(row.get('net_pnl_usd', 0)):+.2f}  ({self._safe_int(row.get('trades', 0))})"
                 )
             msg += f"─────────────────────\n🧭 *By Sleeve:*{sleeve_lines}\n"
         else:
@@ -796,11 +829,11 @@ class TelegramNotifier:
         if exit_rows:
             exit_lines = ""
             for row in exit_rows:
-                pf_val = row.get("profit_factor", 0.0)
+                pf_val = self._safe_float(row.get("profit_factor", 0.0))
                 pf_str = "inf" if pf_val == float("inf") else f"{pf_val:.2f}"
                 exit_lines += (
-                    f"\n   `{row['key']}`: {row['win_rate']:.0%} WR  "
-                    f"PF {pf_str}  ${row['net_pnl_usd']:+.2f}  ({row['trades']})"
+                    f"\n   `{row.get('key', '?')}`: {self._safe_float(row.get('win_rate', 0)):.0%} WR  "
+                    f"PF {pf_str}  ${self._safe_float(row.get('net_pnl_usd', 0)):+.2f}  ({self._safe_int(row.get('trades', 0))})"
                 )
             msg += f"─────────────────────\n🎯 *By Exit:*{exit_lines}\n"
         else:
@@ -811,7 +844,7 @@ class TelegramNotifier:
                 tp_flag = "TP1" if pos.get("tp1_hit") else "OPEN"
                 pos_lines += (
                     f"\n   `{pos['symbol']}`: {str(pos['direction']).upper()}  "
-                    f"entry ${float(pos['entry']):,.4f}  size ${float(pos['size_usd']):,.2f}  {tp_flag}"
+                    f"entry ${self._safe_float(pos.get('entry', 0.0)):,.4f}  size ${self._safe_float(pos.get('size_usd', 0.0)):,.2f}  {tp_flag}"
                 )
             msg += f"─────────────────────\n📌 *Open Positions:*{pos_lines}\n"
         else:
@@ -819,7 +852,7 @@ class TelegramNotifier:
         if recent_closed:
             closed_lines = ""
             for row in recent_closed[:3]:
-                pnl = float(row.get("pnl_usd", 0.0))
+                pnl = self._safe_float(row.get("pnl_usd", 0.0))
                 sign = "+" if pnl >= 0 else ""
                 closed_lines += (
                     f"\n   `{row.get('symbol', '?')}`: {str(row.get('direction', '?')).upper()}  "

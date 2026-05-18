@@ -311,6 +311,37 @@ def test_cycle_report_includes_extra_performance_metrics(monkeypatch):
     assert "Recovery `" in sent["message"]
 
 
+def test_cycle_report_normalizes_string_floating_values(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity="80.00",
+            drawdown_pct="1.5",
+            daily_pnl_pct="0.2",
+            open_trades="2",
+            cycle_num=3,
+            total_trades=1,
+            starting_equity=80.0,
+            floating_positions=[{"pnl_usd": "1.25"}, {"pnl_usd": None}],
+            open_positions=[{"symbol": "BTC/USDT:USDT", "direction": "long", "entry": "1.0", "size_usd": "2.0"}],
+        )
+    )
+
+    assert "💰 Equity: *$81.25 USDT*" in sent["message"]
+    assert "Open Positions" in sent["message"]
+
+
 def test_cycle_report_shows_no_symbols_scored(monkeypatch):
     monkeypatch.setenv("TELEGRAM_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
@@ -337,6 +368,47 @@ def test_cycle_report_shows_no_symbols_scored(monkeypatch):
     )
 
     assert "No symbols scored this cycle" in sent["message"]
+
+
+def test_monthly_report_tolerates_sparse_report(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.monthly_report(
+            {
+                "trades": 4,
+                "mode": "paper",
+                "monthly_trades": "4",
+                "monthly_days": "30",
+                "equity": "82.50",
+                "peak_equity": "84.00",
+                "monthly_return_pct": "3.25",
+                "win_rate": "0.5",
+                "profit_factor": "1.75",
+                "avg_rr": "2.1",
+                "drawdown_pct": "1.2",
+                "net_pnl": "2.5",
+                "best_trade": "1.0",
+                "worst_trade": "-0.5",
+                "sharpe": "1.4",
+                "sortino": "2.2",
+                "calmar": "0.8",
+            }
+        )
+    )
+
+    assert "MONTHLY STATEMENT" in sent["message"]
+    assert "Equity: *$82.50*" in sent["message"]
+    assert "Profit Factor: `1.75`" in sent["message"]
 
 
 def test_equity_graph_report_sends_png_photo(monkeypatch):
