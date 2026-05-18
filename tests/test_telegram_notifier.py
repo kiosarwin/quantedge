@@ -188,6 +188,41 @@ def test_performance_report_shows_empty_open_positions(monkeypatch):
     assert "🧾 *Recent Executions:* _none_" in sent["message"]
 
 
+def test_performance_report_uses_floating_equity(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.performance_report(
+            report={
+                "trades": 3,
+                "win_rate": 2 / 3,
+                "profit_factor": 1.8,
+                "avg_rr": 2.1,
+                "drawdown_pct": 1.4,
+                "ml_accuracy": 0.57,
+                "ml_trend": "stable",
+                "kelly_factor": 1.0,
+            },
+            equity=80.0,
+            mode="paper",
+            floating_positions=[{"pnl_usd": 5.0}, {"pnl_usd": -1.0}],
+            open_positions=[],
+            recent_closed=[],
+        )
+    )
+
+    assert "💰 *Equity:* `$84.00`" in sent["message"]
+
+
 def test_cycle_report_includes_active_session_in_header(monkeypatch):
     monkeypatch.setenv("TELEGRAM_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")

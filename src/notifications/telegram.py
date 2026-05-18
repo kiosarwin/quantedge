@@ -706,6 +706,7 @@ class TelegramNotifier:
         equity: float,
         mode: str,
         open_positions: list[dict] | None = None,
+        floating_positions: list[dict] | None = None,
         recent_closed: list[dict] | None = None,
     ) -> None:
         """Fund manager style performance report sent periodically."""
@@ -729,6 +730,8 @@ class TelegramNotifier:
         trend_emoji = {"improving": "📈", "declining": "📉", "stable": "➡️"}.get(ml_trend, "➡️")
         mode_label = "🟢 LIVE" if mode == "live" else "📋 PAPER"
         kelly_label = "🔼 Scaling Up" if kelly_f > 1.05 else "🔽 Scaling Down" if kelly_f < 0.95 else "⚖️ Neutral"
+        floating_total = sum(self._safe_float(p.get("pnl_usd", 0.0)) for p in floating_positions or [])
+        effective_equity = self._safe_float(equity) + floating_total
 
         regime_lines = ""
         for regime, s in report.get("regime_breakdown", {}).items():
@@ -740,7 +743,7 @@ class TelegramNotifier:
             f"🧮 *JIM SIMONS — FUND MANAGER REPORT*\n"
             f"`Mode: {mode_label}`\n"
             f"═══════════════════════\n"
-            f"💰 *Equity:* `${equity:,.2f}`\n"
+            f"💰 *Equity:* `${effective_equity:,.2f}`\n"
             f"📋 *Trades:* `{n}`  |  Drawdown: `{dd:.1f}%`\n"
             f"─────────────────────\n"
             f"🏆 *Win Rate:* `{win_rate:.1%}`\n"
