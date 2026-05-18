@@ -346,6 +346,7 @@ class TelegramNotifier:
             bonus_line = f"Jim's Bonus: `+0.00x` — earn it by winning"
 
         floating_total = sum(p["pnl_usd"] for p in floating_positions) if floating_positions else 0.0
+        balance = self._safe_float(equity)
         effective_equity = equity + floating_total
         total_pnl_usd = effective_equity - starting_equity if starting_equity > 0 else 0.0
         total_pnl_pct = (total_pnl_usd / starting_equity * 100) if starting_equity > 0 else 0.0
@@ -357,6 +358,7 @@ class TelegramNotifier:
             f"`{now}`",
             f"🌍 Session: *{active_session}*",
             f"══════════════════════",
+            f"🏦 Balance: *${balance:,.2f} USDT*",
             f"💰 Equity: *${effective_equity:,.2f} USDT*",
             f"{total_emoji} Total PnL: *{total_sign}${total_pnl_usd:.2f} ({total_sign}{total_pnl_pct:.2f}%)*",
             f"{pnl_emoji} Daily P&L: *{daily_pnl_pct:+.2f}%*  {dd_emoji} Drawdown: *{drawdown_pct:.1f}%*",
