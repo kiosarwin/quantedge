@@ -591,9 +591,9 @@ class NinjaTrader:
                 _wins = sum(1 for t in _tlog if t.pnl_usd > 0)
                 _win_rate = _wins / _n_trades if _n_trades > 0 else 0.0
                 _sharpe = self._fund_mgr.sharpe_ratio(self._equity_curve) if len(self._equity_curve) >= 5 else 0.0
-                _price_map = {sym: snap.last_price for sym, snap in snapshots.items()}
-                _floating = self._trade_mgr.get_floating_pnl(_price_map)
                 _open_positions = self._telegram_open_positions()
+                _price_map = await self._price_map_with_open_trades(snapshots)
+                _floating = self._trade_mgr.get_floating_pnl(_price_map)
                 _effective_equity, _effective_daily_pnl_pct, _effective_drawdown_pct = (
                     self._effective_account_metrics(_floating)
                 )
@@ -636,20 +636,9 @@ class NinjaTrader:
                         open_positions=self._telegram_open_positions(),
                     )
                 # ── Monitor open trades ───────────────────────────────────
-                price_map = {sym: snap.last_price for sym, snap in snapshots.items()}
-
-                # Fetch price for open trades not in current scan (symbol fell off list)
-                missing = [s for s in self._trade_mgr.open_symbols if s not in price_map]
-                for sym in missing:
-                    try:
-                        ticker = await self._client.fetch_ticker(sym)
-                        price_map[sym] = float(ticker.get("last", 0) or 0)
-                    except Exception as exc:
-                        log.warning("Could not fetch price for open trade %s: %s", sym, exc)
-
                 if self._shadow:
-                    self._shadow.on_tick(price_map)
-                await self._trade_mgr.monitor_all(price_map)
+                    self._shadow.on_tick(_price_map)
+                await self._trade_mgr.monitor_all(_price_map)
 
                 # ── Exchange position reconciliation (live only, every 5 min) ──
                 if self._trading["mode"] == "live" and time.time() - self._last_reconcile_ts > 300:
@@ -1832,6 +1821,17 @@ class NinjaTrader:
                 "exit_profile": getattr(trade.setup, "exit_profile", "default"),
             })
         return open_trades
+
+    async def _price_map_with_open_trades(self, snapshots) -> dict[str, float]:
+        price_map = {sym: snap.last_price for sym, snap in snapshots.items()}
+        missing = [symbol for symbol in self._trade_mgr.open_symbols if symbol not in price_map]
+        for symbol in missing:
+            try:
+                ticker = await self._client.fetch_ticker(symbol)
+                price_map[symbol] = float(ticker.get("last", 0) or 0)
+            except Exception as exc:
+                log.warning("Could not fetch price for open trade %s: %s", symbol, exc)
+        return price_map
 
     def _threshold_for(self, regime) -> float:
         thresholds = self._trading.get("regime_thresholds", {})

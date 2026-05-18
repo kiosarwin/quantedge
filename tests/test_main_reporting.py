@@ -132,6 +132,25 @@ def test_maybe_send_equity_graph_report_runs_on_interval():
     assert sent["points"] == bot._equity_graph_points
 
 
+def test_price_map_includes_open_trades_missing_from_scan(monkeypatch):
+    bot = NinjaTrader.__new__(NinjaTrader)
+
+    class _Client:
+        async def fetch_ticker(self, symbol):
+            return {"last": 42.5 if symbol == "MISSING/USDT:USDT" else 0.0}
+
+    bot._client = _Client()
+    bot._trade_mgr = SimpleNamespace(open_symbols=["MISSING/USDT:USDT", "SEEN/USDT:USDT"])
+    snapshots = {
+        "SEEN/USDT:USDT": SimpleNamespace(last_price=10.0),
+    }
+
+    price_map = asyncio.run(bot._price_map_with_open_trades(snapshots))
+
+    assert price_map["SEEN/USDT:USDT"] == 10.0
+    assert price_map["MISSING/USDT:USDT"] == 42.5
+
+
 def test_run_bootstrap_audit_now_sends_once_and_exits(monkeypatch):
     sent = {}
 
