@@ -1,6 +1,8 @@
 # Ninja Trader Strategy Stack
 
 > Catatan handoff: `session.md` memuat state runtime terkini. Gunakan itu sebagai sumber kebenaran operasional, bukan konteks lama yang disusun ulang.
+>
+> Roadmap transisi menuju arsitektur `quant mini` ada di [`QUANT_MINI_ROADMAP.md`](./QUANT_MINI_ROADMAP.md).
 
 ## Kerangka Strategi
 
