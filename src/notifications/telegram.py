@@ -44,6 +44,24 @@ class TelegramNotifier:
     #  Public API                                                          #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _safe_float(value, default: float = 0.0) -> float:
+        try:
+            if value in ("", None):
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value, default: int = 0) -> int:
+        try:
+            if value in ("", None):
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     async def trade_opened(
         self,
         bd: "SignalBreakdown",
@@ -216,9 +234,12 @@ class TelegramNotifier:
     ) -> None:
         if not self._enabled:
             return
+        open_trades = self._safe_int(open_trades)
+        drawdown_pct = self._safe_float(drawdown_pct)
+        daily_pnl_pct = self._safe_float(daily_pnl_pct)
         status = "🟢 Active" if open_trades > 0 else "⏳ Scanning"
         top_line = ", ".join(top_signals[:3]) if top_signals else "none"
-        floating_total = sum(p.get("pnl_usd", 0.0) for p in floating_positions or [])
+        floating_total = sum(self._safe_float(p.get("pnl_usd", 0.0)) for p in floating_positions or [])
         effective_equity = equity + floating_total
         msg = (
             f"🧮 *Heartbeat*\n"
@@ -420,6 +441,28 @@ class TelegramNotifier:
 
         lines.append(f"──────────────────────")
         lines.append(f"🔍 *Scan Results* (top {min(len(breakdowns),5)} of {len(breakdowns)} scored | score/threshold):")
+        if not breakdowns:
+            lines.append(f"_No symbols scored this cycle — scanner returned no eligible setups._")
+            lines.append("Legend: `R` regime, `S` smart-money alignment, `X` net expectancy after fees/cost.")
+            lines.append(f"──────────────────────")
+            lines.append(f"🗺️ *Roadmap:*")
+            if readiness_passed:
+                lines.append(f"🚀 *ALL CRITERIA PASSED — Switching to LIVE!*")
+            elif paper_trades >= 20 and ml_ready:
+                lines.append(f"🤖 *Phase 2 — ML Active*  acc `{ml_accuracy:.1%}`")
+                lines.append(f"   Monitoring 7 live-readiness criteria...")
+            else:
+                done = min(paper_trades, 20)
+                bar_filled = int(done / 20 * 10)
+                bar = "▓" * bar_filled + "░" * (10 - bar_filled)
+                lines.append(
+                    f"📍 Phase 1 — Bootstrap  [{bar}]  `{done}/20` paper trades\n"
+                    f"   Building trade history for ML training..."
+                )
+            lines.append(f"══════════════════════")
+            lines.append(f"_The model never sleeps, Boss. — Jim_ 🧮🥷")
+            await self._send("\n".join(lines))
+            return
         fire_count = 0
         for b in breakdowns[:5]:
             gates = f"R{'✓' if b.regime_ok else '✗'} S{'✓' if b.smart_money_ok else '✗'} X{'✓' if b.ev_ok else '✗'}"
@@ -514,8 +557,41 @@ class TelegramNotifier:
             f"_The model never sleeps, Boss. — Jim_ 🧮🥷"
         )
 
+    async def shutdown(
+        self,
+        *,
+        mode: str,
+        equity: float,
+        open_trades: int,
+        close_positions: bool,
+    ) -> None:
+        if not self._enabled:
+            return
+        mode_label = "paper" if mode == "paper" else "live"
+        status_line = "Closing open positions before exit." if close_positions else "Open positions preserved on shutdown."
+        await self._send(
+            f"🛑 *Ninja Trader is shutting down*\n"
+            f"══════════════════════\n"
+            f"Mode: `{mode_label.upper()}`  |  Equity: `${equity:,.2f}`\n"
+            f"Open positions at stop: `{open_trades}`\n"
+            f"{status_line}\n"
+            f"──────────────────────\n"
+            f"_Shutdown complete. Monitoring paused._"
+        )
+
     async def restored_positions(self, positions: list[dict], mode: str) -> None:
-        if not self._enabled or not positions:
+        if not self._enabled:
+            return
+        if not positions:
+            mode_label = "paper" if mode == "paper" else "live"
+            await self._send(
+                f"📌 *Restored Open Positions*\n"
+                f"══════════════════════\n"
+                f"Mode: `{mode_label.upper()}`  |  Count: `0`\n"
+                f"No open positions to restore.\n"
+                f"──────────────────────\n"
+                f"_State synced. Monitoring continues._"
+            )
             return
         mode_label = "paper" if mode == "paper" else "live"
         rows = []
@@ -635,19 +711,19 @@ class TelegramNotifier:
         """Fund manager style performance report sent periodically."""
         if not self._enabled:
             return
-        n = report.get("trades", 0)
+        n = self._safe_int(report.get("trades", 0))
         if n == 0:
             return
 
-        win_rate = report.get("win_rate", 0)
-        pf = report.get("profit_factor", 0)
-        avg_rr = report.get("avg_rr", 0)
-        dd = report.get("drawdown_pct", 0)
-        ml_acc = report.get("ml_accuracy", 0)
+        win_rate = self._safe_float(report.get("win_rate", 0))
+        pf = self._safe_float(report.get("profit_factor", 0))
+        avg_rr = self._safe_float(report.get("avg_rr", 0))
+        dd = self._safe_float(report.get("drawdown_pct", 0))
+        ml_acc = self._safe_float(report.get("ml_accuracy", 0))
         ml_trend = report.get("ml_trend", "stable")
-        kelly_f = report.get("kelly_factor", 1.0)
-        best = report.get("best_trade_usd", report.get("best_trade", 0))
-        worst = report.get("worst_trade_usd", report.get("worst_trade", 0))
+        kelly_f = self._safe_float(report.get("kelly_factor", 1.0), 1.0)
+        best = self._safe_float(report.get("best_trade_usd", report.get("best_trade", 0)))
+        worst = self._safe_float(report.get("worst_trade_usd", report.get("worst_trade", 0)))
         attribution = report.get("attribution", {})
 
         trend_emoji = {"improving": "📈", "declining": "📉", "stable": "➡️"}.get(ml_trend, "➡️")
@@ -689,6 +765,8 @@ class TelegramNotifier:
                     f"PF {pf_str}  ${row['net_pnl_usd']:+.2f}  ({row['trades']})"
                 )
             msg += f"─────────────────────\n🧭 *By Sleeve:*{sleeve_lines}\n"
+        else:
+            msg += f"─────────────────────\n🧭 *By Sleeve:* _none_\n"
         exit_rows = attribution.get("by_exit_profile", [])[:3]
         if exit_rows:
             exit_lines = ""
@@ -700,6 +778,8 @@ class TelegramNotifier:
                     f"PF {pf_str}  ${row['net_pnl_usd']:+.2f}  ({row['trades']})"
                 )
             msg += f"─────────────────────\n🎯 *By Exit:*{exit_lines}\n"
+        else:
+            msg += f"─────────────────────\n🎯 *By Exit:* _none_\n"
         if open_positions:
             pos_lines = ""
             for pos in open_positions[:3]:
@@ -709,6 +789,8 @@ class TelegramNotifier:
                     f"entry ${float(pos['entry']):,.4f}  size ${float(pos['size_usd']):,.2f}  {tp_flag}"
                 )
             msg += f"─────────────────────\n📌 *Open Positions:*{pos_lines}\n"
+        else:
+            msg += f"─────────────────────\n📌 *Open Positions:* _none_\n"
         if recent_closed:
             closed_lines = ""
             for row in recent_closed[:3]:
@@ -719,6 +801,8 @@ class TelegramNotifier:
                     f"{sign}${pnl:.2f}  {str(row.get('reason', '')).replace('_', ' ')}"
                 )
             msg += f"─────────────────────\n🧾 *Recent Executions:*{closed_lines}\n"
+        else:
+            msg += f"─────────────────────\n🧾 *Recent Executions:* _none_\n"
 
         await self._send(msg)
 

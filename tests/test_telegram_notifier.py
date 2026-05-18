@@ -90,6 +90,34 @@ def test_heartbeat_uses_floating_pnl(monkeypatch):
     assert "Equity *$84.00*" in sent["message"]
 
 
+def test_heartbeat_normalizes_empty_open_and_dd(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.heartbeat(
+            equity=80.0,
+            drawdown_pct="",
+            daily_pnl_pct=None,
+            open_trades=None,
+            top_signals=[],
+            floating_positions=None,
+            open_positions=None,
+        )
+    )
+
+    assert "Open `0`" in sent["message"]
+    assert "DD `0.0%`" in sent["message"]
+
+
 def test_performance_report_uses_fund_manager_header(monkeypatch):
     monkeypatch.setenv("TELEGRAM_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
@@ -121,6 +149,43 @@ def test_performance_report_uses_fund_manager_header(monkeypatch):
 
     assert "JIM SIMONS — FUND MANAGER REPORT" in sent["message"]
     assert "Mode: 📋 PAPER" in sent["message"]
+
+
+def test_performance_report_shows_empty_open_positions(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.performance_report(
+            report={
+                "trades": 3,
+                "win_rate": 2 / 3,
+                "profit_factor": 1.8,
+                "avg_rr": 2.1,
+                "drawdown_pct": 1.4,
+                "ml_accuracy": 0.57,
+                "ml_trend": "stable",
+                "kelly_factor": 1.0,
+            },
+            equity=80.99,
+            mode="paper",
+            open_positions=[],
+            recent_closed=[],
+        )
+    )
+
+    assert "📌 *Open Positions:* _none_" in sent["message"]
+    assert "🧭 *By Sleeve:* _none_" in sent["message"]
+    assert "🎯 *By Exit:* _none_" in sent["message"]
+    assert "🧾 *Recent Executions:* _none_" in sent["message"]
 
 
 def test_cycle_report_includes_active_session_in_header(monkeypatch):
@@ -156,6 +221,34 @@ def test_cycle_report_includes_active_session_in_header(monkeypatch):
     assert "Session: *London*" in sent["message"]
 
 
+def test_cycle_report_shows_no_symbols_scored(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity=80.0,
+            drawdown_pct=0.0,
+            daily_pnl_pct=0.0,
+            open_trades=0,
+            cycle_num=11,
+            total_trades=0,
+            starting_equity=80.0,
+        )
+    )
+
+    assert "No symbols scored this cycle" in sent["message"]
+
+
 def test_bootstrap_audit_report_uses_separate_header(monkeypatch):
     monkeypatch.setenv("TELEGRAM_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
@@ -184,3 +277,72 @@ def test_bootstrap_audit_report_uses_separate_header(monkeypatch):
     assert "`Cadence: 12h`" in sent["message"]
     assert "`Session: Asia`" in sent["message"]
     assert "Separate from Jim Simons report" in sent["message"]
+
+
+def test_restored_positions_reports_empty_state(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(notifier.restored_positions([], mode="paper"))
+
+    assert "Count: `0`" in sent["message"]
+    assert "No open positions to restore." in sent["message"]
+
+
+def test_shutdown_reports_closed_positions(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.shutdown(
+            mode="paper",
+            equity=80.0,
+            open_trades=2,
+            close_positions=True,
+        )
+    )
+
+    assert "shutting down" in sent["message"].lower()
+    assert "Open positions at stop: `2`" in sent["message"]
+    assert "Closing open positions before exit." in sent["message"]
+
+
+def test_shutdown_reports_preserved_positions(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.shutdown(
+            mode="live",
+            equity=81.5,
+            open_trades=1,
+            close_positions=False,
+        )
+    )
+
+    assert "Mode: `LIVE`" in sent["message"]
+    assert "Open positions preserved on shutdown." in sent["message"]

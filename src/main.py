@@ -1268,9 +1268,9 @@ class NinjaTrader:
         log.info(
             "Heartbeat  equity=$%.2f  drawdown=%.1f%%  daily_pnl=%.1f%%  open=%d",
             equity,
-            self._risk.state.drawdown_pct,
-            self._risk.state.daily_pnl_pct,
-            self._risk.state.open_trade_count,
+            float(self._risk.state.drawdown_pct or 0.0),
+            float(self._risk.state.daily_pnl_pct or 0.0),
+            int(self._risk.state.open_trade_count or 0),
         )
 
     async def _on_trade_closed(self, trade: OpenTrade, pnl: float, reason: str) -> None:
@@ -1682,6 +1682,7 @@ class NinjaTrader:
             "close_positions_on_shutdown",
             self._trading["mode"] != "live",
         )
+        open_trades = len(self._trade_mgr._trades)
         if close_on_shutdown:
             log.info("Shutting down — closing all open trades...")
             await self._trade_mgr.close_all("shutdown")
@@ -1689,6 +1690,12 @@ class NinjaTrader:
             log.warning(
                 "Shutting down — preserving open trades because close_positions_on_shutdown=false"
             )
+        await self._telegram.shutdown(
+            mode=self._trading["mode"],
+            equity=self._risk.state.equity,
+            open_trades=open_trades,
+            close_positions=close_on_shutdown,
+        )
         await self._client.close()
         log.info("Ninja Trader stopped.")
 

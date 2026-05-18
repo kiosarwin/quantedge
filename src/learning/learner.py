@@ -9,11 +9,16 @@ import json
 import logging
 import os
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Optional
 
 log = logging.getLogger(__name__)
+
+
+def _trade_record_from_dict(data: dict) -> "TradeRecord":
+    allowed = {field.name for field in fields(TradeRecord)}
+    return TradeRecord(**{key: value for key, value in data.items() if key in allowed})
 
 
 @dataclass
@@ -161,7 +166,7 @@ class Learner:
                 if k in loaded_weights:
                     self._weights[k] = float(loaded_weights[k])
             for t in state.get("trade_log", []):
-                self._trade_log.append(TradeRecord(**t))
+                self._trade_log.append(_trade_record_from_dict(t))
             log.info("Learner state loaded: %d trades, weights=%s", len(self._trade_log), self._weights)
         except Exception as exc:
             log.warning("Could not load learner state: %s", exc)
