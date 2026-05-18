@@ -51,8 +51,8 @@ paper_validation:
   ev_hard_gate_min_trades: 40     # After this, EV relax is disabled; only positive EV passes
   ml_hard_gate_min_trades: 999
   ev_relax_score_buffer: 3.0
-  ev_bootstrap_max_deficit_pct: 0.15
-  ev_probation_max_deficit_pct: 0.10 # Stricter than bootstrap; used for the probation layer
+  ev_bootstrap_max_deficit_pct: 1.25      # Paper bootstrap can tolerate up to -1.25% EV
+  ev_probation_max_deficit_pct: 0.75      # Probation is stricter than bootstrap, still paper-only
   high_conviction_score_trigger: 64.0
   high_conviction_ev_max_deficit_pct: 0.50
   high_conviction_min_total_scale: 0.30
