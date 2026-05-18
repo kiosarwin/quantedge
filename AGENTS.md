@@ -2,6 +2,8 @@
 
 Panduan kerja ringkas untuk agent/code session.
 
+> Session handoff: baca `session.md` dulu sebelum mengambil keputusan baru; file itu berisi state repo, VM, dan bot terkini.
+
 ## 1) Think first
 
 - Tulis asumsi jika ada.

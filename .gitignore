@@ -7,7 +7,6 @@ venv/
 .claude/
 *.log
 =
-session.md
 data/
 data/cache/
 data/trades/

@@ -1,5 +1,7 @@
 # Quant Operating Model
 
+> Session handoff: lihat `session.md` untuk state terbaru sebelum menafsirkan aturan operasi di bawah ini.
+
 ## Default posture
 
 - Default mode is `paper`.

@@ -1,5 +1,7 @@
 # Ninja Trader — Changelog
 
+> Session handoff: state terbaru ada di `session.md`; jangan re-derive konteks lama dari changelog ini.
+
 ---
 
 ## [Unreleased] — 2026-04-23 — Setup-Specific Pwin + Rejection Forensics

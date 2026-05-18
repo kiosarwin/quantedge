@@ -4,6 +4,8 @@ Ninja Trader is an automated Binance Futures trading bot written in Python.
 It scans USDT-margined perpetual pairs, scores them across multiple signals,
 manages risk automatically, and learns from its own trade history.
 
+> Session handoff: refer to `session.md` for the current repo/VM/bot state before repeating setup or debugging steps.
+
 ---
 
 ## Table of Contents

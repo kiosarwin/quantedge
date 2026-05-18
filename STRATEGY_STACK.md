@@ -1,5 +1,7 @@
 # Ninja Trader Strategy Stack
 
+> Session handoff: `session.md` contains the current runtime state; use it instead of reconstructing old context.
+
 ## Core Thesis
 
 This bot now treats directional crypto-perp trading as a regime-aware stack:

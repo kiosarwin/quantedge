@@ -1,6 +1,8 @@
 # Ninja Smart Trader — Spot Edition
 ## Complete Setup & Strategy Guide
 
+> Session handoff: sebelum setup ulang atau debug, baca `session.md` untuk state terbaru repo/VM/bot.
+
 > **A precision Binance Spot swing trading bot — long only, no leverage,
 > designed for consistent capital growth.**
 

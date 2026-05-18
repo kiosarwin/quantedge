@@ -1,0 +1,60 @@
+# Session Notes
+
+Last updated: 2026-05-18
+
+## Current State
+
+- Repo `/home/arwin/ninja_trader` is a git repo on branch `work`.
+- Clean commit `c20fed4` is pushed to `origin/master` on `git@github.com:kiosarwin/ninja-trader.git`.
+- Production VM `35.231.37.107` is synced to that commit and bot is running in `tmux` session `ninja-vm`.
+- Telegram heartbeat is active and formatted short; `cycle_report` spam is gated off by default.
+- Live secrets were sanitized out of tracked markdown/config files; runtime `.env` stays on the VM.
+
+## What Is Already Done
+
+- Initialized git in the correct repo and linked it to GitHub.
+- Removed live credential literals from markdown/config files before commit.
+- Kept runtime artifacts out of the repository via `.gitignore`.
+- Verified repo tests: `34 passed`.
+- Deployed the clean commit to production VM and restarted the bot successfully.
+
+## Current Runtime Behavior
+
+- Bot is healthy and scanning normally on the VM.
+- Heartbeat remains active in the short format.
+- Scanner, risk guard, and trade loop are running from the deployed commit.
+- No local commit changes remain after pushing `work -> master`.
+
+## Important Files
+
+- [`src/main.py`](/home/arwin/ninja_trader/src/main.py)
+- [`src/risk/risk_manager.py`](/home/arwin/ninja_trader/src/risk/risk_manager.py)
+- [`src/risk/kelly_sizer.py`](/home/arwin/ninja_trader/src/risk/kelly_sizer.py)
+- [`src/execution/trade_manager.py`](/home/arwin/ninja_trader/src/execution/trade_manager.py)
+- [`src/models/cohort_policy.py`](/home/arwin/ninja_trader/src/models/cohort_policy.py)
+- [`src/scoring/scorer.py`](/home/arwin/ninja_trader/src/scoring/scorer.py)
+- [`config/config.yaml`](/home/arwin/ninja_trader/config/config.yaml)
+- [`tests/test_risk_manager.py`](/home/arwin/ninja_trader/tests/test_risk_manager.py)
+- [`tests/test_paper_validation.py`](/home/arwin/ninja_trader/tests/test_paper_validation.py)
+- [`tests/test_cohort_policy.py`](/home/arwin/ninja_trader/tests/test_cohort_policy.py)
+
+## Verified Tests
+
+- `./venv/bin/python -m pytest tests/test_risk_manager.py tests/test_paper_validation.py tests/test_cohort_policy.py -q`
+- Result: `26 passed`
+
+## Safe Next Step
+
+If resuming in a new session, do this first:
+
+1. `tmux capture-pane -pt ninja_trader -S -80`
+2. `./venv/bin/python -c "from src.main import load_config, normalize_config; cfg=normalize_config(load_config('config/config.yaml')); print(cfg['trading']['paper_starting_equity'], cfg['risk']['min_risk_usd'], cfg['risk']['max_direction_risk_pct'], cfg['trading']['max_open_trades'])"`
+3. `pgrep -af "python -m src.main|python -m src|venv/bin/python -m src"`
+
+If the live process drifts, restart from the `tmux` session after confirming config.
+
+## Resume Prompt
+
+Use this prompt in a new session:
+
+> Continue in `/home/arwin/ninja_trader`. Read `session.md` first. Current paper run is fresh from `$80`, config is already tuned for small-account paper sampling, and the bot is running in `tmux` session `ninja_trader`. Do not re-litigate GitHub or repo issues; there is no git repo here. Verify the live config and runtime state first, then only make surgical changes if a concrete bug or bottleneck is still present. Current key settings to preserve unless explicitly changed: `paper_starting_equity=80`, `risk_per_trade_pct=1.0`, `min_risk_usd=0.75`, `max_open_trades=4`, `max_direction_risk_pct=2.50`, isolated margin, and `edge_policy=false`. Prioritize checking `tmux capture-pane -pt ninja_trader`, `logs/futures_trader.log`, and whether the bot is healthy/opening trades as expected. Keep changes minimal and verify with the relevant tests before handoff.

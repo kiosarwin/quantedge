@@ -1,5 +1,7 @@
 # Ninja Trader — Futures Edition Runbook
 
+> Session handoff: start from `session.md` for the latest repo/VM/bot state; do not replay earlier setup steps unless needed.
+
 ## Overview
 
 Institutional-grade Binance USDT-margined Perpetual Futures bot.

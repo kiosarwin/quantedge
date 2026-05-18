@@ -1,5 +1,7 @@
 # Ninja Trader — Panduan Lengkap (Bahasa Indonesia)
 
+> Session handoff: baca `session.md` dulu; itu ringkasan state terbaru repo, VM, dan bot.
+
 ## Apa Itu Ninja Trader?
 
 Ninja Trader adalah bot trading kripto otomatis yang beroperasi di Binance Futures (USDT-margined perpetual). Bot ini bekerja 24 jam penuh — memindai pasangan kripto, menilai sinyal menggunakan indikator institusional, mengelola posisi secara dinamis, dan **belajar dari riwayat tradingnya sendiri** untuk terus berkembang.

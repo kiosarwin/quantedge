@@ -1,5 +1,7 @@
 # Ninja Trader — Handbook
 
+> Session handoff: `session.md` is the source of truth for the current repo, VM, and bot state.
+
 ## What Is This
 
 An automated crypto futures trading bot running on Binance USDT-margined perpetual futures. It scans pairs, scores signals using institutional-grade indicators, manages positions with dynamic exits, and learns from its own trade history to improve over time.
