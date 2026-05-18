@@ -104,10 +104,10 @@ class TradeManager:
         try:
             sl_order = await self._executor.place_stop_loss(setup, entry_order["id"])
             tp1_order = await self._executor.place_take_profit(
-                setup, setup.tp1, self._exit["tp1_size_pct"]
+                setup, setup.tp1, setup.tp1_size_pct
             )
             tp2_order = await self._executor.place_take_profit(
-                setup, setup.tp2, self._exit["tp2_size_pct"]
+                setup, setup.tp2, setup.tp2_size_pct
             )
         except Exception as exc:
             log.error(
@@ -190,8 +190,6 @@ class TradeManager:
     # ------------------------------------------------------------------ #
 
     async def _check_exits(self, trade: OpenTrade, price: float) -> None:
-        exit_cfg = self._exit
-
         # Update MFE/MAE in R multiples
         r = trade.setup.r_distance
         if r > 0:
@@ -208,7 +206,7 @@ class TradeManager:
                 trade.mae_r = max(trade.mae_r, adv / r)
 
         # Max hold duration
-        if time.time() - trade.opened_at > self._cfg["exit"].get("max_hold_duration_s", 3600):
+        if time.time() - trade.opened_at > trade.setup.max_hold_duration_s:
             await self._close_trade(trade, price, "max_hold")
             return
 
@@ -230,13 +228,15 @@ class TradeManager:
         if not trade.tp1_hit and trade.is_tp1_hit(price):
             log.info("[%s] TP1 hit @ %.4f", trade.symbol, price)
             trade.tp1_hit = True
-            trade.remaining_contracts *= (1 - exit_cfg["tp1_size_pct"])
-            pnl = abs(trade.setup.tp1 - trade.setup.entry_price) * (trade.setup.size_contracts * exit_cfg["tp1_size_pct"])
+            trade.remaining_contracts *= (1 - trade.setup.tp1_size_pct)
+            pnl = abs(trade.setup.tp1 - trade.setup.entry_price) * (
+                trade.setup.size_contracts * trade.setup.tp1_size_pct
+            )
             trade.realized_pnl += pnl
             # Move SL to breakeven
             trade.setup.stop_loss = trade.setup.entry_price
             # Init ATR-based trailing stop
-            trail_dist = trade.setup.atr * exit_cfg.get("trailing_atr_multiplier", 1.5)
+            trail_dist = trade.setup.atr * trade.setup.trailing_atr_multiplier
             if trade.direction == "long":
                 trade.trailing_stop = price - trail_dist
             else:
@@ -244,7 +244,7 @@ class TradeManager:
 
         # Update trailing stop (ratchet only — never widen)
         if trade.tp1_hit and trade.trailing_stop is not None:
-            trail_dist = trade.setup.atr * exit_cfg.get("trailing_atr_multiplier", 1.5)
+            trail_dist = trade.setup.atr * trade.setup.trailing_atr_multiplier
             if trade.direction == "long":
                 new_trail = price - trail_dist
                 if new_trail > trade.trailing_stop:
@@ -259,7 +259,7 @@ class TradeManager:
             pass  # TP1 not yet hit, nothing to do for TP2 yet
         elif trade.is_tp2_hit(price) and not getattr(trade, "tp2_hit", False):
             trade.tp2_hit = True
-            tp2_close_pct = exit_cfg.get("tp2_size_pct", 0.30)
+            tp2_close_pct = trade.setup.tp2_size_pct
             contracts_to_close = trade.remaining_contracts * tp2_close_pct
             pnl = abs(trade.setup.tp2 - trade.setup.entry_price) * contracts_to_close
             trade.realized_pnl += pnl

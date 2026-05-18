@@ -218,3 +218,71 @@ def test_calculate_setup_allows_rr_at_threshold_with_float_noise(monkeypatch):
 
     assert setup is not None
     assert rm.last_setup_rejection_reason == ""
+
+
+def test_calculate_setup_uses_sleeve_specific_exit_profile(monkeypatch):
+    monkeypatch.setattr(risk_manager_module, "atr", lambda *_args, **_kwargs: 2.0)
+    cfg = {
+        "trading": {"max_open_trades": 1},
+        "risk": {
+            "daily_loss_cap_pct": 5.0,
+            "weekly_loss_cap_pct": 8.0,
+            "max_drawdown_pct": 15.0,
+            "risk_per_trade_pct": 1.0,
+            "max_risk_per_trade_pct": 1.25,
+            "cooldown_after_loss_streak": 2,
+            "cooldown_minutes": 30,
+            "max_symbol_risk_pct": 1.0,
+            "max_direction_risk_pct": 1.5,
+            "default_leverage": 5,
+            "max_leverage": 10,
+            "stop_loss_atr_multiplier": 1.5,
+            "min_rr_ratio": 2.0,
+            "min_risk_usd": 0.0,
+            "min_notional_usd": 5.0,
+        },
+        "exit": {
+            "tp1_r_multiple": 1.5,
+            "tp2_r_multiple": 2.0,
+            "tp1_size_pct": 0.50,
+            "tp2_size_pct": 0.30,
+            "trail_size_pct": 0.20,
+            "breakeven_trigger_r": 1.0,
+            "trailing_atr_multiplier": 1.5,
+            "max_hold_duration_s": 172800,
+        },
+        "exit_profiles": {
+            "compression_breakout": {
+                "tp1_r_multiple": 1.4,
+                "tp2_r_multiple": 2.3,
+                "tp3_r_multiple": 3.2,
+                "tp1_size_pct": 0.40,
+                "tp2_size_pct": 0.35,
+                "trail_size_pct": 0.25,
+                "breakeven_trigger_r": 0.9,
+                "trailing_atr_multiplier": 1.4,
+                "max_hold_duration_s": 172800,
+            }
+        },
+        "safety": {"max_consecutive_losses": 5},
+        "indicators": {"atr_period": 14},
+    }
+    rm = RiskManager(cfg, exploration_mode=False)
+    rm.update_equity(1000.0)
+    df = pd.DataFrame({"close": [100.0] * 60})
+
+    setup = rm.calculate_setup(
+        symbol="BTC/USDT:USDT",
+        direction="long",
+        df=df,
+        entry_price=100.0,
+        strategy_sleeve="compression_breakout",
+        kelly_scale=1.0,
+        ev_result=None,
+    )
+
+    assert setup is not None
+    assert setup.exit_profile == "compression_breakout"
+    assert setup.tp1_size_pct == 0.40
+    assert setup.tp2_size_pct == 0.35
+    assert setup.trailing_atr_multiplier == 1.4

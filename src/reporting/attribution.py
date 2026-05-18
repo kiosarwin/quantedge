@@ -18,6 +18,7 @@ class AttributionRow:
     net_pnl_usd: float
     avg_pnl_usd: float
     avg_pnl_pct: float
+    avg_dispersion_value: float = 0.0
 
 
 def _safe_sleeve(trade) -> str:
@@ -51,6 +52,25 @@ def _safe_exit_profile(trade) -> str:
     return "default"
 
 
+def _safe_dispersion_state(trade) -> str:
+    explicit = getattr(trade, "dispersion_state", "") or str(getattr(trade, "scores", {}).get("dispersion_state", "") or "")
+    return explicit or "normal"
+
+
+def _safe_dispersion_value(trade) -> float:
+    explicit = getattr(trade, "dispersion_value", None)
+    if explicit is not None:
+        try:
+            return float(explicit)
+        except Exception:
+            return 0.0
+    scores = getattr(trade, "scores", {}) or {}
+    try:
+        return float(scores.get("dispersion_value", 0.0) or 0.0)
+    except Exception:
+        return 0.0
+
+
 def _infer_regime(scores: dict) -> str:
     code = int(scores.get("regime_code", -1) or -1)
     return {
@@ -77,6 +97,7 @@ def summarize_grouped(trade_log: list, key_fn: Callable[[object], str], min_trad
         gross_loss = abs(sum(t.pnl_usd for t in losses))
         pf = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if wins else 0.0)
         net = sum(t.pnl_usd for t in trades)
+        avg_dispersion = sum(_safe_dispersion_value(t) for t in trades) / len(trades) if trades else 0.0
         rows.append(
             AttributionRow(
                 key=key,
@@ -88,6 +109,7 @@ def summarize_grouped(trade_log: list, key_fn: Callable[[object], str], min_trad
                 net_pnl_usd=net,
                 avg_pnl_usd=(net / len(trades)) if trades else 0.0,
                 avg_pnl_pct=(sum(t.pnl_pct for t in trades) / len(trades)) if trades else 0.0,
+                avg_dispersion_value=avg_dispersion,
             )
         )
 
@@ -98,6 +120,7 @@ def summarize_grouped(trade_log: list, key_fn: Callable[[object], str], min_trad
 def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
     by_sleeve = summarize_grouped(trade_log, lambda t: _safe_sleeve(t), min_trades=min_trades)
     by_exit_profile = summarize_grouped(trade_log, lambda t: _safe_exit_profile(t), min_trades=min_trades)
+    by_dispersion_state = summarize_grouped(trade_log, lambda t: _safe_dispersion_state(t), min_trades=min_trades)
     by_regime = summarize_grouped(trade_log, lambda t: getattr(t, "regime", "") or "unknown", min_trades=min_trades)
     by_side = summarize_grouped(trade_log, lambda t: getattr(t, "direction", "") or "unknown", min_trades=min_trades)
     by_regime_side = summarize_grouped(
@@ -108,6 +131,16 @@ def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
     by_sleeve_exit_profile = summarize_grouped(
         trade_log,
         lambda t: f"{_safe_sleeve(t)}|{_safe_exit_profile(t)}",
+        min_trades=min_trades,
+    )
+    by_sleeve_dispersion_state = summarize_grouped(
+        trade_log,
+        lambda t: f"{_safe_sleeve(t)}|{_safe_dispersion_state(t)}",
+        min_trades=min_trades,
+    )
+    by_regime_dispersion_state = summarize_grouped(
+        trade_log,
+        lambda t: f"{getattr(t, 'regime', '') or 'unknown'}|{_safe_dispersion_state(t)}",
         min_trades=min_trades,
     )
     by_exit_profile_regime_side = summarize_grouped(
@@ -124,10 +157,13 @@ def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
     return {
         "by_sleeve": [asdict(r) for r in by_sleeve],
         "by_exit_profile": [asdict(r) for r in by_exit_profile],
+        "by_dispersion_state": [asdict(r) for r in by_dispersion_state],
         "by_regime": [asdict(r) for r in by_regime],
         "by_side": [asdict(r) for r in by_side],
         "by_regime_side": [asdict(r) for r in by_regime_side],
         "by_sleeve_exit_profile": [asdict(r) for r in by_sleeve_exit_profile],
+        "by_sleeve_dispersion_state": [asdict(r) for r in by_sleeve_dispersion_state],
+        "by_regime_dispersion_state": [asdict(r) for r in by_regime_dispersion_state],
         "by_exit_profile_regime_side": [asdict(r) for r in by_exit_profile_regime_side],
         "by_sleeve_regime_side": [asdict(r) for r in by_sleeve_regime_side],
         "headline": {
@@ -135,6 +171,8 @@ def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
             "worst_sleeve": by_sleeve[-1].key if by_sleeve else None,
             "best_exit_profile": by_exit_profile[0].key if by_exit_profile else None,
             "worst_exit_profile": by_exit_profile[-1].key if by_exit_profile else None,
+            "best_dispersion_state": by_dispersion_state[0].key if by_dispersion_state else None,
+            "worst_dispersion_state": by_dispersion_state[-1].key if by_dispersion_state else None,
         },
     }
 

@@ -31,6 +31,8 @@ class TradeRecord:
     regime: str = ""    # regime at entry — used for per-regime edge tracking
     strategy_sleeve: str = ""
     exit_profile: str = ""
+    dispersion_value: float = 0.0
+    dispersion_state: str = "normal"
     mfe_r: float = 0.0
     mae_r: float = 0.0
     tp1_hit: bool = False

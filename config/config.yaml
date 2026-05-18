@@ -106,6 +106,16 @@ exit_profiles:
     breakeven_trigger_r: 1.0
     trailing_atr_multiplier: 1.8
     max_hold_duration_s: 259200
+  compression_breakout:
+    tp1_r_multiple: 1.4
+    tp2_r_multiple: 2.3
+    tp3_r_multiple: 3.2
+    tp1_size_pct: 0.40
+    tp2_size_pct: 0.35
+    trail_size_pct: 0.25
+    breakeven_trigger_r: 0.9
+    trailing_atr_multiplier: 1.4
+    max_hold_duration_s: 172800
   reversal:
     tp1_r_multiple: 1.0
     tp2_r_multiple: 1.6

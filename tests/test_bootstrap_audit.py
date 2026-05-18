@@ -3,7 +3,18 @@ from types import SimpleNamespace
 from src.reporting.bootstrap import build_bootstrap_audit_report, format_bootstrap_audit_lines
 
 
-def _trade(symbol: str, direction: str, pnl_usd: float, pnl_pct: float, session: str, opened_at: float, closed_at: float, tp1_hit: bool = False):
+def _trade(
+    symbol: str,
+    direction: str,
+    pnl_usd: float,
+    pnl_pct: float,
+    session: str,
+    opened_at: float,
+    closed_at: float,
+    tp1_hit: bool = False,
+    dispersion_state: str = "normal",
+    dispersion_value: float = 0.0,
+):
     return SimpleNamespace(
         symbol=symbol,
         direction=direction,
@@ -15,6 +26,8 @@ def _trade(symbol: str, direction: str, pnl_usd: float, pnl_pct: float, session:
         tp1_hit=tp1_hit,
         reason="tp2",
         strategy_sleeve="reversal" if direction == "short" else "trend_following",
+        dispersion_state=dispersion_state,
+        dispersion_value=dispersion_value,
         asset=symbol.split("/")[0],
         timeframe="1h",
         entry_reason="bootstrap sample",
@@ -24,9 +37,10 @@ def _trade(symbol: str, direction: str, pnl_usd: float, pnl_pct: float, session:
 
 def test_bootstrap_audit_report_includes_direction_mix_session_matrix_and_edge_state():
     trades = [
-        _trade("BTC/USDT:USDT", "long", 1.25, 1.5, "asia", 100.0, 200.0, tp1_hit=True),
-        _trade("ETH/USDT:USDT", "short", -0.75, -0.9, "london", 150.0, 260.0),
-        _trade("BCH/USDT:USDT", "short", 0.50, 0.6, "london", 180.0, 300.0, tp1_hit=True),
+        _trade("BTC/USDT:USDT", "long", 1.25, 1.5, "asia", 100.0, 200.0, tp1_hit=True, dispersion_state="normal", dispersion_value=22.0),
+        _trade("ETH/USDT:USDT", "short", -0.75, -0.9, "london", 150.0, 260.0, dispersion_state="warn", dispersion_value=31.0),
+        _trade("BCH/USDT:USDT", "short", 0.50, 0.6, "london", 180.0, 300.0, tp1_hit=True, dispersion_state="high", dispersion_value=44.0),
+        _trade("BTC/USDT:USDT", "long", 0.80, 0.9, "asia", 220.0, 330.0, tp1_hit=True, dispersion_state="high", dispersion_value=43.0),
     ]
 
     edge_memory = SimpleNamespace(
@@ -54,9 +68,13 @@ def test_bootstrap_audit_report_includes_direction_mix_session_matrix_and_edge_s
     assert "Phase:" in joined
     assert "Mix: `LONG`" in joined or "Mix: LONG" in joined
     assert "Session matrix open→close" in joined
+    assert "Sessions:" in joined
     assert "Edge memory: `12` samples" in joined
     assert "BCH/USDT:USDT" in joined
     assert "Cohorts:" in joined
+    assert "Cohort " in joined
+    assert "Attribution sleeves:" in joined
+    assert "Attribution dispersion:" in joined
 
 
 def test_bootstrap_audit_report_marks_small_sample_bootstrap():

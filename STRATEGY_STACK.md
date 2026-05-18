@@ -87,12 +87,26 @@ Forward evaluation should report:
 
 Implemented now:
 
-- strategy router
-- dispersion-aware score and sizing overlays
-- state/reporting metadata for sleeve attribution
+- `strategy_router` routes into `trend_following`, `compression_breakout`, `reversal`, and `neutral`
+- dispersion-aware score and sizing overlays are applied in the scorer
+- sleeve, exit profile, regime, and side attribution are recorded in reporting
+- sleeve-specific exit profiles are wired into live and backtest TP sizing, trailing, and hold-time parameters
+- attribution reports already group by sleeve, regime, side, and sleeve x regime/side combinations
+
+Partially implemented:
+
+- `compression_breakout` exists but is still gated by config
+- short reversal exists but remains constrained by config thresholds and flags
+- the exit engine still shares one flow, even though sleeve-specific parameters now shape it
+- reporting covers dispersion grouping, but not a dedicated universe-level dispersion factor in backtester summaries
 
 Not implemented yet:
 
 - dedicated sleeve-specific exit logic
 - market-neutral funding carry sleeve
 - explicit cross-sectional dispersion factor in backtester reports
+
+Current coverage vs target:
+
+- coverage: routing, scoring overlays, attribution metadata, and grouped reports
+- target gap: sleeve-native exits, carry sleeve, and explicit dispersion reporting

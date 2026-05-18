@@ -32,6 +32,7 @@ _MIN_BARS = 210
 class BacktestTrade:
     symbol: str
     direction: str
+    exit_profile: str
     entry_bar: int
     entry_price: float
     stop_loss: float
@@ -40,6 +41,10 @@ class BacktestTrade:
     size_contracts: float
     size_usd: float
     r_distance: float
+    tp1_size_pct: float
+    tp2_size_pct: float
+    trailing_atr_multiplier: float
+    max_hold_duration_s: int
     exit_bar: int = 0
     exit_price: float = 0.0
     exit_reason: str = ""
@@ -222,6 +227,7 @@ class BacktestEngine:
                         open_trade = BacktestTrade(
                             symbol=symbol,
                             direction=bd.direction,
+                            exit_profile=setup.exit_profile,
                             entry_bar=i,
                             entry_price=entry_price,
                             stop_loss=setup.stop_loss,
@@ -230,6 +236,10 @@ class BacktestEngine:
                             size_contracts=setup.size_contracts,
                             size_usd=setup.size_usd,
                             r_distance=setup.r_distance,
+                            tp1_size_pct=setup.tp1_size_pct,
+                            tp2_size_pct=setup.tp2_size_pct,
+                            trailing_atr_multiplier=setup.trailing_atr_multiplier,
+                            max_hold_duration_s=setup.max_hold_duration_s,
                             remaining_contracts=setup.size_contracts,
                             entry_score=bd.total_score,
                         )
@@ -346,9 +356,7 @@ class BacktestEngine:
         close: float,
         bar_idx: int,
     ) -> tuple[BacktestTrade, bool]:
-        exit_cfg = self._exit_cfg
-        trail_pct = exit_cfg.get("tp2_trailing_stop_pct", 0.15)
-        max_hold = exit_cfg.get("max_hold_duration_s", 3600)
+        trail_pct = self._exit_cfg.get("tp2_trailing_stop_pct", 0.15)
 
         # Update MFE/MAE in R multiples before exit logic
         if trade.r_distance > 0:
@@ -363,9 +371,9 @@ class BacktestEngine:
 
         # TP1 hit first on this bar
         if not trade.tp1_hit and trade.is_tp1_hit(low, high):
-            tp1_pnl = abs(trade.tp1 - trade.entry_price) * (trade.size_contracts * exit_cfg["tp1_size_pct"])
+            tp1_pnl = abs(trade.tp1 - trade.entry_price) * (trade.size_contracts * trade.tp1_size_pct)
             trade.pnl_usd = tp1_pnl if trade.direction == "long" else tp1_pnl
-            trade.remaining_contracts *= (1 - exit_cfg["tp1_size_pct"])
+            trade.remaining_contracts *= (1 - trade.tp1_size_pct)
             trade.stop_loss = trade.entry_price   # move to breakeven
             trade.tp1_hit = True
             if trade.direction == "long":

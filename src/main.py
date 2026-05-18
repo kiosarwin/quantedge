@@ -1241,6 +1241,8 @@ class NinjaTrader:
             regime=_regime_str,
             strategy_sleeve=str(scores.get("strategy_sleeve", "")),
             exit_profile=str(getattr(trade.setup, "exit_profile", "") or str(scores.get("exit_profile", "") or "")),
+            dispersion_value=float(scores.get("dispersion_value", 0.0) or 0.0),
+            dispersion_state=str(scores.get("dispersion_state", "normal") or "normal"),
             mfe_r=trade.mfe_r,
             mae_r=trade.mae_r,
             tp1_hit=trade.tp1_hit,
@@ -1426,18 +1428,7 @@ class NinjaTrader:
             lifecycle_report=lifecycle_report,
             edge_memory=edge_memory,
         )
-        lines = format_bootstrap_audit_lines(audit)
-        attribution = build_attribution_report(trade_log, min_trades=2) if trade_log else {}
-        sleeve_rows = attribution.get("by_sleeve", [])[:3]
-        if sleeve_rows:
-            lines.append("Attribution sleeves:")
-            for row in sleeve_rows:
-                pf = row.get("profit_factor", 0.0)
-                pf_str = "inf" if pf == float("inf") else f"{pf:.2f}"
-                lines.append(
-                    f"  `{row['key']}` WR `{row['win_rate']:.0%}` PF `{pf_str}` PnL `${row['net_pnl_usd']:+.2f}`"
-                )
-        return lines
+        return format_bootstrap_audit_lines(audit)
 
     async def _maybe_send_fund_manager_report(
         self,

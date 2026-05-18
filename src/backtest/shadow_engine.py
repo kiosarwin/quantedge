@@ -115,6 +115,7 @@ class ShadowEngine:
         trade = BacktestTrade(
             symbol=sym,
             direction=setup.direction,
+            exit_profile=setup.exit_profile,
             entry_bar=self._tick_counter.get(sym, 0),
             entry_price=entry,
             stop_loss=setup.stop_loss,
@@ -123,6 +124,10 @@ class ShadowEngine:
             size_contracts=setup.size_contracts,
             size_usd=setup.size_usd,
             r_distance=setup.r_distance,
+            tp1_size_pct=setup.tp1_size_pct,
+            tp2_size_pct=setup.tp2_size_pct,
+            trailing_atr_multiplier=setup.trailing_atr_multiplier,
+            max_hold_duration_s=setup.max_hold_duration_s,
             remaining_contracts=setup.size_contracts,
         )
         self._open[sym] = trade
@@ -271,7 +276,13 @@ class ShadowEngine:
             state = json.loads(self._save_path.read_text())
             self._closed = [_ClosedShadowTrade(**t) for t in state.get("closed", [])]
             for sym, entry in state.get("open", {}).items():
-                self._open[sym] = BacktestTrade(**entry["trade"])
+                trade_payload = dict(entry["trade"])
+                trade_payload.setdefault("exit_profile", "default")
+                trade_payload.setdefault("tp1_size_pct", 0.50)
+                trade_payload.setdefault("tp2_size_pct", 0.30)
+                trade_payload.setdefault("trailing_atr_multiplier", 1.5)
+                trade_payload.setdefault("max_hold_duration_s", 172800)
+                self._open[sym] = BacktestTrade(**trade_payload)
                 self._open_meta[sym] = entry["meta"]
             self._equity = state.get("equity", self._initial_equity)
             self._peak_equity = state.get("peak_equity", self._initial_equity)

@@ -35,6 +35,11 @@ def _session_from_ts(ts: float) -> str:
     return active_market_session_key(datetime.fromtimestamp(ts, tz=WITA))
 
 
+def _fmt_pf(value: object) -> str:
+    pf = _safe_float(value, 0.0)
+    return "inf" if pf == inf else f"{pf:.2f}"
+
+
 def _metrics(trades: list) -> dict[str, float]:
     if not trades:
         return {
@@ -177,14 +182,18 @@ def format_bootstrap_audit_lines(report: dict) -> list[str]:
     direction = report.get("direction", {})
     recent = report.get("recent", {})
     cohort_counts = report.get("cohort_counts", {})
+    cohort_rows = report.get("cohort_rows", [])
     edge_total_samples = int(report.get("edge_total_samples", 0))
     edge_rows = report.get("edge_rows", [])
+    attribution = report.get("attribution", {})
+    session_counts = report.get("session_counts", {})
+    session_label = str(report.get("session_label", "") or "").strip()
 
     lines.append(f"Phase: `{'BOOTSTRAP' if report.get('sample_too_small') else 'MEASURE'}` | N `{n}`")
     lines.append(
         "Overall: "
         f"WR `{overall.get('win_rate', 0.0):.1%}` | "
-        f"PF `{overall.get('profit_factor', 0.0):.2f}` | "
+        f"PF `{_fmt_pf(overall.get('profit_factor', 0.0))}` | "
         f"Exp `${overall.get('expectancy_usd', 0.0):+.2f}` | "
         f"TP1 `{overall.get('tp1_hit_rate', 0.0):.1%}` | "
         f"MaxDD `${overall.get('max_drawdown_usd', 0.0):.2f}`"
@@ -193,23 +202,76 @@ def format_bootstrap_audit_lines(report: dict) -> list[str]:
         "Mix: "
         f"LONG `{int(direction.get('long', {}).get('count', 0))}` "
         f"WR `{direction.get('long', {}).get('win_rate', 0.0):.1%}` "
-        f"PF `{direction.get('long', {}).get('profit_factor', 0.0):.2f}`  "
+        f"PF `{_fmt_pf(direction.get('long', {}).get('profit_factor', 0.0))}`  "
         f"SHORT `{int(direction.get('short', {}).get('count', 0))}` "
         f"WR `{direction.get('short', {}).get('win_rate', 0.0):.1%}` "
-        f"PF `{direction.get('short', {}).get('profit_factor', 0.0):.2f}`"
+        f"PF `{_fmt_pf(direction.get('short', {}).get('profit_factor', 0.0))}`"
     )
     for window in sorted(recent):
         data = recent[window]
         lines.append(
             f"Last `{window}`: WR `{data.get('win_rate', 0.0):.1%}` "
-            f"PF `{data.get('profit_factor', 0.0):.2f}` "
+            f"PF `{_fmt_pf(data.get('profit_factor', 0.0))}` "
             f"Exp `${data.get('expectancy_usd', 0.0):+.2f}`"
         )
+    if session_counts:
+        session_parts = [
+            f"`{key}:{count}`"
+            for key, count in sorted(session_counts.items(), key=lambda item: (-int(item[1]), item[0]))
+        ]
+        session_line = "Sessions: " + " ".join(session_parts[:4])
+        if session_label:
+            session_line += f" | Active `{session_label}`"
+        lines.append(session_line)
     lines.append(
         "Cohorts: "
         + " ".join(f"`{k}:{v}`" for k, v in sorted(cohort_counts.items()))
         + f" | Rec `{report.get('cohort_recommendation', 'PAPER_ONLY')}`"
     )
+    for row in cohort_rows[:2]:
+        lines.append(
+            "  Cohort "
+            f"`{row.get('strategy_name', 'unknown')}` "
+            f"`{row.get('market_regime', 'unknown')}` "
+            f"`{row.get('session', 'unknown')}` "
+            f"`{row.get('direction', 'unknown')}` "
+            f"n `{row.get('trades', 0)}` "
+            f"exp `${row.get('expectancy_usd', 0.0):+.2f}` "
+            f"pf `{_fmt_pf(row.get('profit_factor', 0.0))}`"
+        )
+    sleeve_rows = attribution.get("by_sleeve", [])[:2]
+    if sleeve_rows:
+        lines.append("Attribution sleeves:")
+        for row in sleeve_rows:
+            lines.append(
+                "  "
+                f"`{row['key']}` "
+                f"WR `{row['win_rate']:.0%}` "
+                f"PF `{_fmt_pf(row['profit_factor'])}` "
+                f"PnL `${row['net_pnl_usd']:+.2f}`"
+            )
+    dispersion_rows = attribution.get("by_dispersion_state", [])[:2]
+    if dispersion_rows:
+        lines.append("Attribution dispersion:")
+        for row in dispersion_rows:
+            lines.append(
+                "  "
+                f"`{row['key']}` "
+                f"WR `{row['win_rate']:.0%}` "
+                f"PF `{_fmt_pf(row['profit_factor'])}` "
+                f"PnL `${row['net_pnl_usd']:+.2f}`"
+            )
+    regime_side_rows = attribution.get("by_regime_side", [])[:2]
+    if regime_side_rows:
+        lines.append("Attribution regime-side:")
+        for row in regime_side_rows:
+            lines.append(
+                "  "
+                f"`{row['key']}` "
+                f"n `{row['trades']}` "
+                f"WR `{row['win_rate']:.0%}` "
+                f"PF `{_fmt_pf(row['profit_factor'])}`"
+            )
     lines.append("Session matrix open→close:")
     lines.extend(f"  {row}" for row in report.get("session_matrix", [])[:5])
     if edge_total_samples > 0:

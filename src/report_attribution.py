@@ -27,6 +27,7 @@ def _render_rows(title: str, rows: list[dict], limit: int = 12) -> None:
     tbl.add_column("Net $", justify="right")
     tbl.add_column("Avg $", justify="right")
     tbl.add_column("Avg %", justify="right")
+    tbl.add_column("Disp", justify="right")
 
     for row in rows[:limit]:
         pf = row["profit_factor"]
@@ -35,6 +36,7 @@ def _render_rows(title: str, rows: list[dict], limit: int = 12) -> None:
         net = row["net_pnl_usd"]
         avg = row["avg_pnl_usd"]
         avg_pct = row["avg_pnl_pct"]
+        disp = row.get("avg_dispersion_value", 0.0)
         tbl.add_row(
             row["key"],
             str(row["trades"]),
@@ -43,6 +45,7 @@ def _render_rows(title: str, rows: list[dict], limit: int = 12) -> None:
             f"[{'green' if net >= 0 else 'red'}]{net:+.2f}[/]",
             f"[{'green' if avg >= 0 else 'red'}]{avg:+.2f}[/]",
             f"[{'green' if avg_pct >= 0 else 'red'}]{avg_pct:+.2f}%[/]",
+            f"{disp:.1f}",
         )
     console.print(tbl)
 
@@ -60,6 +63,8 @@ def main() -> None:
             f"Worst sleeve: {report['headline'].get('worst_sleeve') or 'n/a'}",
             f"Best exit: {report['headline'].get('best_exit_profile') or 'n/a'}",
             f"Worst exit: {report['headline'].get('worst_exit_profile') or 'n/a'}",
+            f"Best dispersion: {report['headline'].get('best_dispersion_state') or 'n/a'}",
+            f"Worst dispersion: {report['headline'].get('worst_dispersion_state') or 'n/a'}",
         ]),
         title="Strategy Attribution",
         border_style="cyan",
@@ -67,11 +72,14 @@ def main() -> None:
 
     _render_rows("By Sleeve", report["by_sleeve"])
     _render_rows("By Exit Profile", report["by_exit_profile"])
+    _render_rows("By Dispersion State", report["by_dispersion_state"])
     _render_rows("By Regime", report["by_regime"])
     _render_rows("By Side", report["by_side"])
     _render_rows("By Regime x Side", report["by_regime_side"])
     _render_rows("By Sleeve x Exit Profile", report["by_sleeve_exit_profile"], limit=20)
+    _render_rows("By Sleeve x Dispersion", report["by_sleeve_dispersion_state"], limit=20)
     _render_rows("By Exit Profile x Regime x Side", report["by_exit_profile_regime_side"], limit=20)
+    _render_rows("By Regime x Dispersion", report["by_regime_dispersion_state"], limit=20)
     _render_rows("By Sleeve x Regime x Side", report["by_sleeve_regime_side"], limit=20)
 
 

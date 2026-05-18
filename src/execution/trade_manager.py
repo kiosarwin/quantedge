@@ -211,8 +211,6 @@ class TradeManager:
     # ------------------------------------------------------------------ #
 
     async def _check_exits(self, trade: OpenTrade, price: float) -> None:
-        exit_cfg = self._exit
-
         # Update MFE/MAE and time-tracking
         now = time.time()
         r = trade.setup.r_distance
