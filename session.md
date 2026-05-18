@@ -7,7 +7,7 @@ Last updated: 2026-05-18
 - Repo `/home/arwin/ninja_trader` is a git repo on branch `work`.
 - Clean commit `7cea795` is pushed to `origin/master` on `git@github.com:kiosarwin/ninja-trader.git`.
 - Production VM `35.231.37.107` is synced to that commit and bot is running in `tmux` session `ninja-vm`.
-- Telegram heartbeat is active and formatted short; `cycle_report` spam is gated off by default.
+- Telegram heartbeat is off; `JIM SIMONS — FUND MANAGER REPORT` remains the primary Telegram cadence every 5 minutes.
 - Live secrets were sanitized out of tracked markdown/config files; runtime `.env` stays on the VM.
 
 ## What Is Already Done
@@ -21,7 +21,7 @@ Last updated: 2026-05-18
 ## Current Runtime Behavior
 
 - Bot is healthy and scanning normally on the VM.
-- Heartbeat remains active in the short format.
+- Telegram heartbeat is disabled; fund manager report remains active every 5 minutes.
 - Scanner, risk guard, and trade loop are running from the deployed commit.
 - No local commit changes remain after pushing `work -> master`.
 
