@@ -109,6 +109,24 @@ def test_strategy_router_allows_compression_breakout_only_with_participation():
     assert "compression + participation" in decision.reason
 
 
+def test_strategy_router_allows_trend_following_with_soft_funding_bias():
+    router = StrategyRouter(_cfg())
+    decision = router.evaluate(
+        _breakdown(
+            direction="long",
+            regime="trending_expansion",
+            sm_phase="trending",
+            sm_bias="long",
+            volume_confirmation=44.0,
+            open_interest=43.0,
+            funding_sentiment=78.0,
+        ),
+        DispersionState(value=0.0, state="normal"),
+    )
+    assert decision.sleeve == "trend_following"
+    assert "trend sleeve via trending_expansion" in decision.reason
+
+
 def test_strategy_router_identifies_short_reversal_candidate():
     router = StrategyRouter(_cfg())
     breakdown = _breakdown(
