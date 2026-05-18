@@ -31,6 +31,8 @@ def _breakdown(
     sm_score=90.0,
     structure_quality=70.0,
     volume_confirmation=60.0,
+    open_interest=60.0,
+    funding_sentiment=50.0,
     volatility=25.0,
     trend_strength=72.0,
 ):
@@ -44,6 +46,8 @@ def _breakdown(
         ),
         structure_quality=structure_quality,
         volume_confirmation=volume_confirmation,
+        open_interest=open_interest,
+        funding_sentiment=funding_sentiment,
         volatility=volatility,
         trend_strength=trend_strength,
     )
@@ -67,6 +71,42 @@ def test_strategy_router_blocks_short_trend_following():
     )
     assert decision.sleeve == "neutral"
     assert "short side restricted" in decision.reason
+
+
+def test_strategy_router_blocks_trend_when_funding_is_extreme_against_direction():
+    router = StrategyRouter(_cfg())
+    decision = router.evaluate(
+        _breakdown(
+            direction="long",
+            regime="trending_expansion",
+            sm_phase="trending",
+            sm_bias="long",
+            funding_sentiment=90.0,
+        ),
+        DispersionState(value=0.0, state="normal"),
+    )
+    assert decision.sleeve == "neutral"
+    assert "funding/OI not aligned" in decision.reason
+
+
+def test_strategy_router_allows_compression_breakout_only_with_participation():
+    cfg = _cfg()
+    cfg["strategy"]["enable_compression_breakout"] = True
+    router = StrategyRouter(cfg)
+    decision = router.evaluate(
+        _breakdown(
+            direction="long",
+            regime="accumulation_compression",
+            sm_phase="accumulation",
+            sm_bias="neutral",
+            structure_quality=68.0,
+            volume_confirmation=70.0,
+            open_interest=66.0,
+        ),
+        DispersionState(value=0.0, state="normal"),
+    )
+    assert decision.sleeve == "compression_breakout"
+    assert "compression + participation" in decision.reason
 
 
 def test_strategy_router_identifies_short_reversal_candidate():

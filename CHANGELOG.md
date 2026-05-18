@@ -4,6 +4,27 @@
 
 ---
 
+## [Unreleased] — 2026-05-19 — Strategy Stack Alignment
+
+### Changed
+- `STRATEGY_STACK.md`: clarified that `neutral` is residual routing, not alpha; added Binance Futures operational rule table and runtime mapping.
+- `README.md`: documented that `trend_following` and `reversal` are the core alpha sleeves, while `neutral` is fallback only.
+- `QUANT_OPERATING_MODEL.md`: noted that `neutral` is excluded from default live admission allowlists and added expectancy-per-sleeve as a metric.
+- `config/config.yaml`: removed `neutral` from the default paper strategy sleeve allowlist.
+
+### Code
+- `src/models/strategy_router.py`: aligned sleeve routing with regime/flow/funding/OI/participation filters.
+- `src/scoring/scorer.py`: kept alpha sleeves anchored to institutional score while making `neutral` conservative.
+- `src/main.py`, `src/models/cohort_policy.py`: default admission path now blocks `neutral` by allowlist.
+
+### Tests
+- `tests/test_strategy_router.py`
+- `tests/test_paper_validation.py`
+- `tests/test_cohort_policy.py`
+
+### Why
+- The bot was still able to classify and carry `neutral` through some internal paths. This update makes the docs and runtime policy explicit: `neutral` is not alpha.
+
 ## [Unreleased] — 2026-04-23 — Setup-Specific Pwin + Rejection Forensics
 
 ### Added

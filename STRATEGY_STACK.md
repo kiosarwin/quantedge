@@ -38,6 +38,23 @@ Pemetaan ringkasnya:
 - funding, basis, dan open interest diperlakukan sebagai variabel kondisi pasar yang membantu sizing dan filtering pada pasar perpetual.
 - order flow dan liquidity sweep dipakai sebagai heuristik mikrostruktur yang perlu terus divalidasi dengan data.
 
+## Audit Akademik Sleeve
+
+Tabel ini memisahkan **thesis akademik** dari **cara implementasi sekarang**.
+
+| Sleeve | Thesis akademik | Basis | Implementasi sekarang | Status |
+|---|---|---|---|---|
+| `trend_following` | Time-series momentum pada futures likuid | Kuat | Core sleeve utama, long-only di config saat ini | **Strong** |
+| `reversal` | Momentum dapat berbalik pada rezim crowding / liquidation / diffusion lag | Menengah-kuat | Diaktifkan lewat smart-money + distribution/liquidity-sweep context | **Strong / conditional** |
+| `compression_breakout` | Continuation setelah compression / accumulation | Menengah | Tersedia tetapi masih digate; lebih heuristik daripada thesis utama | **Moderate / experimental** |
+| `neutral` | Bukan thesis alpha; bucket residual | Lemah / none | Fallback saat tidak ada sleeve tervalidasi | **Not alpha** |
+
+Implikasi operasional:
+
+- `trend_following` dan `reversal` layak diperlakukan sebagai sleeve alpha utama.
+- `compression_breakout` layak diperlakukan sebagai sleeve riset/opsional sampai bukti out-of-sample cukup.
+- `neutral` tidak boleh masuk hitungan alpha utama; ia hanya menandakan “belum ada edge yang cukup kuat”.
+
 ## Sleeve Strategi
 
 ### `trend_following`
@@ -81,6 +98,41 @@ Efek pada sistem:
 - memberi tambahan score sedang
 - ukuran default lebih kecil
 - bisa memperoleh prioritas relatif lebih tinggi saat dispersion ekstrem
+
+## Rule Table Operasional
+
+Tabel ini menyederhanakan keputusan sleeve menjadi kombinasi kondisi pasar yang paling relevan.
+
+| Kondisi pasar | Sleeve prioritas | Catatan operasional |
+|---|---|---|
+| `trending_expansion` + momentum searah + dispersion `normal` | `trend_following` | Mode alpha utama; sizing bisa naik jika funding tidak ekstrem melawan posisi. |
+| `trending_expansion` + momentum searah + dispersion `warn/high` | `trend_following` diredam | Masih boleh trade, tetapi score dan size turun karena risiko crash/mean reversion naik. |
+| `distribution` + `liquidity_sweep` + funding/OI mulai ekstrem | `reversal` | Cari snapback atau exhaustion; konfirmasi flow lebih penting daripada candle tunggal. |
+| `distribution` + sweep gagal lanjut + open interest turun cepat | `reversal` | Ini konteks reversal paling kuat; target biasanya lebih pendek dan size lebih kecil. |
+| `accumulation_compression` + volatility turun + volume/OI menguat | `compression_breakout` | Hanya jika breakout didukung ekspansi partisipasi, bukan sekadar wick. |
+| `accumulation_compression` + breakout lemah atau false breakout berulang | `neutral` | Jangan memaksa entry; kondisi belum cukup untuk promosi sleeve. |
+| funding ekstrem tetapi arah belum jelas | `neutral` | Funding dipakai sebagai filter, bukan alasan entry sendiri. |
+| OI naik tanpa konfirmasi arah/flow | `neutral` | OI tanpa struktur biasanya noise atau crowded positioning. |
+
+### Mapping ke Runtime
+
+Urutan keputusan praktis yang paling dekat dengan implementasi sekarang:
+
+1. Tentukan `regime`.
+2. Cek `smart_money` dan event mikrostruktur seperti `liquidity_sweep`.
+3. Evaluasi `funding`, `basis`, dan `open_interest` sebagai filter.
+4. Hitung `dispersion` untuk menentukan apakah trend perlu diredam.
+5. Pilih sleeve: `trend_following`, `reversal`, `compression_breakout`, atau `neutral`.
+6. Terapkan multiplier score dan sizing dari sleeve terpilih.
+
+Aturan sederhana yang bisa dibaca langsung:
+
+| Input utama | Output sleeve | Bias sizing |
+|---|---|---|
+| `trending_expansion` + `normal` dispersion | `trend_following` | Naik atau normal |
+| `distribution` + `liquidity_sweep` | `reversal` | Lebih kecil |
+| `accumulation_compression` + partisipasi menguat | `compression_breakout` | Lebih kecil dari trend |
+| tidak ada kombinasi valid | `neutral` | Paling konservatif |
 
 ## Logika Dispersion
 

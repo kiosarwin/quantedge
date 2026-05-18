@@ -43,7 +43,6 @@ paper_validation:
   allowed_strategy_sleeves:
     - trend_following
     - reversal
-    - neutral
   max_open_trades_override: 4
   top_pairs_to_trade_override: 4
   threshold_relaxation: 7.0

@@ -619,10 +619,13 @@ class Scorer:
         for bd in results:
             decision = self._strategy_router.evaluate(bd, dispersion)
             strategy_base = self._strategy_base_score(bd, decision.sleeve)
-            # Keep the institutional score as the primary anchor. The strategy
-            # router should shape conviction, not overwrite an otherwise valid
-            # signal with a much lower sleeve-specific reconstruction.
-            anchored_base = max(float(bd.legacy_score), float(strategy_base))
+            # Keep alpha sleeves anchored to the institutional score, but let
+            # neutral stay conservative so a non-alpha fallback cannot inherit
+            # the full legacy conviction.
+            if decision.sleeve == "neutral":
+                anchored_base = min(float(bd.legacy_score), float(strategy_base))
+            else:
+                anchored_base = max(float(bd.legacy_score), float(strategy_base))
             bd.strategy_sleeve = decision.sleeve
             bd.strategy_reason = decision.reason
             bd.strategy_score_mult = decision.score_mult

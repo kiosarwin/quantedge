@@ -394,7 +394,7 @@ def test_scorer_paper_soft_ev_still_blocks_deeply_negative_expectancy():
     assert scorer._paper_soft_ev_allowed(ev_result) is False
 
 
-def test_score_many_keeps_institutional_score_as_anchor_for_strategy_adjustment():
+def test_score_many_keeps_neutral_fallback_conservative():
     scorer = Scorer.__new__(Scorer)
     scorer._strategy_router = SimpleNamespace(
         classify_dispersion=lambda _rows: SimpleNamespace(value=47.17, state="high"),
@@ -405,6 +405,43 @@ def test_score_many_keeps_institutional_score_as_anchor_for_strategy_adjustment(
             threshold_shift=0.0,
             ranking_bonus=0.0,
             reason="no validated sleeve",
+        ),
+    )
+    scorer._strategy_base_score = lambda _bd, _sleeve: 42.79
+    scorer.score = lambda snap: snap
+
+    breakdown = SimpleNamespace(
+        symbol="NMR/USDT:USDT",
+        legacy_score=53.37,
+        base_score=53.37,
+        total_score=53.37,
+        strategy_sleeve="neutral",
+        strategy_reason="",
+        strategy_score_mult=1.0,
+        strategy_size_mult=1.0,
+        strategy_threshold_shift=0.0,
+        strategy_ranking_bonus=0.0,
+        dispersion_value=0.0,
+        dispersion_state="normal",
+    )
+
+    [rescored] = scorer.score_many({"NMR": breakdown})
+
+    assert rescored.base_score == 42.79
+    assert rescored.total_score == 37.80
+
+
+def test_score_many_keeps_alpha_sleeves_anchored_to_institutional_score():
+    scorer = Scorer.__new__(Scorer)
+    scorer._strategy_router = SimpleNamespace(
+        classify_dispersion=lambda _rows: SimpleNamespace(value=47.17, state="high"),
+        evaluate=lambda _bd, _disp: SimpleNamespace(
+            sleeve="trend_following",
+            score_mult=0.8835,
+            size_mult=0.765,
+            threshold_shift=0.0,
+            ranking_bonus=0.0,
+            reason="trend sleeve",
         ),
     )
     scorer._strategy_base_score = lambda _bd, _sleeve: 42.79

@@ -52,6 +52,13 @@ def test_cohort_policy_allows_short_reversal_when_strategy_matches():
     assert decision.allowed is True
 
 
+def test_cohort_policy_blocks_neutral_sleeve():
+    policy = CohortPolicy(_cfg())
+    decision = policy.evaluate(_breakdown(sleeve="neutral"), [])
+    assert decision.allowed is False
+    assert "strategy sleeve filter" in decision.reason
+
+
 def test_cohort_policy_blocks_paper_reversal_for_symbol_with_bad_local_history():
     policy = CohortPolicy(_cfg())
     bad_history = [

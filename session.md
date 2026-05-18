@@ -1,13 +1,12 @@
 # Session Notes
 
-Last updated: 2026-05-18
+Last updated: 2026-05-19
 
 ## Current State
 
 - Repo `/home/arwin/ninja_trader` is a git repo on branch `work`.
-- Clean commit `7cea795` is pushed to `origin/master` on `git@github.com:kiosarwin/ninja-trader.git`.
-- Production VM `35.231.37.107` is synced to that commit and bot is running in `tmux` session `ninja-vm`.
-- Fresh paper reset applied: persisted trade history and learned state were cleared, and the bot now seeds from `$75`.
+- Strategy-stack alignment changes are in progress: `neutral` is residual routing only, live/paper allowlists center on `trend_following` and `reversal`, and `compression_breakout` stays experimental.
+- Fresh paper reset remains in effect: persisted trade history and learned state were cleared, and the bot seeds from `$75`.
 - Telegram heartbeat is off; `JIM SIMONS — FUND MANAGER REPORT` remains the primary Telegram cadence every 5 minutes.
 - Live secrets were sanitized out of tracked markdown/config files; runtime `.env` stays on the VM.
 
@@ -17,14 +16,15 @@ Last updated: 2026-05-18
 - Removed live credential literals from markdown/config files before commit.
 - Kept runtime artifacts out of the repository via `.gitignore`.
 - Verified repo tests: `34 passed`.
-- Deployed the clean commit to production VM and restarted the bot successfully.
+- Deployed the current paper-reset baseline to production VM and restarted the bot successfully.
 
 ## Current Runtime Behavior
 
 - Bot is healthy and scanning normally on the VM.
 - Telegram heartbeat is disabled; fund manager report remains active every 5 minutes.
 - Scanner, risk guard, and trade loop are running from the deployed commit.
-- No local commit changes remain after pushing `work -> master`.
+- No local commit changes remain after pushing `work -> master` after the previous baseline.
+- `neutral` should not be treated as alpha in admission logic; it is blocked by the default allowlists.
 
 ## Connection Metadata
 

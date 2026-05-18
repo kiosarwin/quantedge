@@ -55,7 +55,7 @@ Jika Anda adalah model AI apa pun — `Codex`, `Claude`, `Gemini`, atau lainnya 
 Arsitektur bot saat ini terdiri dari:
 
 - **scoring layer** untuk menilai setup
-- **strategy router** untuk memilih sleeve
+- **strategy router** untuk memilih sleeve; alpha utama saat ini adalah `trend_following` dan `reversal`, sedangkan `neutral` adalah fallback residual dan tidak diperlakukan sebagai alpha
 - **EV / p(win) layer** untuk menyaring edge
 - **risk manager** untuk posisi, stop, dan exposure
 - **ML layer** untuk prediksi, sizing, dan gating terkontrol

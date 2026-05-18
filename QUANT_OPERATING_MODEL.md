@@ -21,6 +21,7 @@
 9. Execution
 
 Signal validity and execution permission are intentionally separate.
+`neutral` is not treated as alpha in the live admission path; it is a residual routing state and is excluded by the default strategy allowlists.
 
 ## Lifecycle statuses
 
@@ -51,6 +52,7 @@ Primary cohort health is tracked by:
 - win rate
 - profit factor
 - expectancy per trade
+- expectancy per sleeve
 - average win / average loss
 - payoff ratio
 - max drawdown
