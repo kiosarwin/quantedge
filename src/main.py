@@ -390,32 +390,54 @@ class NinjaTrader:
             and ev.ev_net_pct >= -high_deficit
         )
 
+    def _paper_ev_stage(self, ev_trade_count: int) -> str:
+        min_trades = int(
+            self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20)
+        )
+        hard_gate_min_trades = int(
+            self._paper_validation.get(
+                "ev_hard_gate_min_trades",
+                self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20),
+            )
+        )
+        if ev_trade_count < min_trades:
+            return "bootstrap"
+        if ev_trade_count < hard_gate_min_trades:
+            return "probation"
+        return "hard_reject"
+
     def _paper_ev_relax_mode(self, breakdown: SignalBreakdown, threshold: float) -> str | None:
         if not self._paper_validation_enabled():
             return None
         ev = breakdown.ev_result
         if ev is None or breakdown.ev_ok:
             return None
-        min_trades = int(
-            self._paper_validation.get(
-                "ev_hard_gate_min_trades",
-                self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20),
-            )
-        )
-        if ev.trade_count >= min_trades or not breakdown.regime_ok or not breakdown.smart_money_ok:
+        stage = self._paper_ev_stage(ev.trade_count)
+        if stage == "hard_reject" or not breakdown.regime_ok or not breakdown.smart_money_ok:
             return None
 
         floor = float(self._paper_validation.get("min_score_floor", 58.0) or 58.0)
         score_buffer = float(self._paper_validation.get("ev_relax_score_buffer", 2.0) or 2.0)
-        standard_deficit = float(
-            self._paper_validation.get("ev_bootstrap_max_deficit_pct", 0.10) or 0.10
+        bootstrap_deficit = float(
+            self._paper_validation.get("ev_bootstrap_max_deficit_pct", 0.15) or 0.15
         )
-        standard_score = max(floor, threshold - score_buffer)
-        if breakdown.total_score >= standard_score and ev.ev_net_pct >= -standard_deficit:
-            return "standard"
+        probation_deficit = float(
+            self._paper_validation.get("ev_probation_max_deficit_pct", 0.10) or 0.10
+        )
+        bootstrap_score = max(floor, threshold - score_buffer)
+        probation_score = max(floor + 3.0, threshold)
 
+        if stage == "bootstrap":
+            if breakdown.total_score >= bootstrap_score and ev.ev_net_pct >= -bootstrap_deficit:
+                return "bootstrap"
+            if self._paper_high_conviction_candidate(breakdown, threshold):
+                return "bootstrap"
+            return None
+
+        if breakdown.total_score >= probation_score and ev.ev_net_pct >= -probation_deficit:
+            return "probation"
         if self._paper_high_conviction_candidate(breakdown, threshold):
-            return "high_conviction"
+            return "probation"
         return None
 
     async def start(self) -> None:

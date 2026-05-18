@@ -88,6 +88,7 @@ def test_paper_ev_relax_mode_allows_high_conviction_signal():
         "min_score_floor": 58.0,
         "ev_relax_score_buffer": 2.0,
         "ev_bootstrap_max_deficit_pct": 0.10,
+        "ev_probation_max_deficit_pct": 0.05,
         "high_conviction_score_trigger": 68.0,
         "high_conviction_ev_max_deficit_pct": 0.40,
         "high_conviction_allowed_regimes": ["trending_expansion"],
@@ -105,7 +106,7 @@ def test_paper_ev_relax_mode_allows_high_conviction_signal():
         ev_result=SimpleNamespace(trade_count=19, ev_net_pct=-0.36),
     )
 
-    assert bot._paper_ev_relax_mode(breakdown, 58.0) == "high_conviction"
+    assert bot._paper_ev_relax_mode(breakdown, 58.0) == "bootstrap"
     assert bot._paper_high_conviction_candidate(breakdown, 58.0) is True
 
 
@@ -117,6 +118,7 @@ def test_paper_ev_relax_mode_rejects_non_allowlisted_regime():
         "min_score_floor": 58.0,
         "ev_relax_score_buffer": 2.0,
         "ev_bootstrap_max_deficit_pct": 0.10,
+        "ev_probation_max_deficit_pct": 0.05,
         "high_conviction_score_trigger": 68.0,
         "high_conviction_ev_max_deficit_pct": 0.40,
         "high_conviction_allowed_regimes": ["trending_expansion"],
@@ -146,6 +148,7 @@ def test_paper_ev_relax_mode_allows_high_conviction_short_reversal():
         "min_score_floor": 58.0,
         "ev_relax_score_buffer": 2.0,
         "ev_bootstrap_max_deficit_pct": 0.10,
+        "ev_probation_max_deficit_pct": 0.05,
         "high_conviction_score_trigger": 68.0,
         "high_conviction_ev_max_deficit_pct": 0.40,
         "high_conviction_allowed_regimes": ["trending_expansion"],
@@ -170,7 +173,7 @@ def test_paper_ev_relax_mode_allows_high_conviction_short_reversal():
         ev_result=SimpleNamespace(trade_count=19, ev_net_pct=-0.20),
     )
 
-    assert bot._paper_ev_relax_mode(breakdown, 58.0) == "high_conviction"
+    assert bot._paper_ev_relax_mode(breakdown, 58.0) == "bootstrap"
     assert bot._paper_high_conviction_candidate(breakdown, 58.0) is True
 
 
@@ -183,6 +186,7 @@ def test_paper_ev_relax_mode_uses_extended_paper_hard_gate_window():
         "min_score_floor": 55.0,
         "ev_relax_score_buffer": 3.0,
         "ev_bootstrap_max_deficit_pct": 0.15,
+        "ev_probation_max_deficit_pct": 0.10,
     }
     bot._cfg = {"ev_model": {"min_trades_for_ev": 20}}
 
@@ -190,13 +194,39 @@ def test_paper_ev_relax_mode_uses_extended_paper_hard_gate_window():
         ev_ok=False,
         regime_ok=True,
         smart_money_ok=True,
-        total_score=57.0,
+        total_score=60.0,
         regime=SimpleNamespace(value="trending_expansion"),
         smart_money=SimpleNamespace(phase=SimpleNamespace(value="neutral")),
         ev_result=SimpleNamespace(trade_count=20, ev_net_pct=-0.10),
     )
 
-    assert bot._paper_ev_relax_mode(breakdown, 58.0) == "standard"
+    assert bot._paper_ev_relax_mode(breakdown, 58.0) == "probation"
+
+
+def test_paper_ev_relax_mode_blocks_after_hard_gate():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._trading = {"mode": "paper"}
+    bot._paper_validation = {
+        "enabled": True,
+        "ev_hard_gate_min_trades": 40,
+        "min_score_floor": 55.0,
+        "ev_relax_score_buffer": 3.0,
+        "ev_bootstrap_max_deficit_pct": 0.15,
+        "ev_probation_max_deficit_pct": 0.10,
+    }
+    bot._cfg = {"ev_model": {"min_trades_for_ev": 20}}
+
+    breakdown = SimpleNamespace(
+        ev_ok=False,
+        regime_ok=True,
+        smart_money_ok=True,
+        total_score=62.0,
+        regime=SimpleNamespace(value="trending_expansion"),
+        smart_money=SimpleNamespace(phase=SimpleNamespace(value="neutral")),
+        ev_result=SimpleNamespace(trade_count=40, ev_net_pct=-0.05),
+    )
+
+    assert bot._paper_ev_relax_mode(breakdown, 58.0) is None
 
 
 def test_paper_ml_hard_gate_min_trades_uses_paper_override():
@@ -303,10 +333,46 @@ def test_scorer_paper_soft_ev_allows_small_negative_expectancy_before_hard_gate(
             "enabled": True,
             "ev_hard_gate_min_trades": 40,
             "ev_soft_block_max_deficit_pct": 0.50,
+            "ev_bootstrap_max_deficit_pct": 0.15,
+            "ev_probation_max_deficit_pct": 0.10,
         },
         "ev_model": {"min_trades_for_ev": 20},
     }
     ev_result = SimpleNamespace(trade_count=20, ev_net_pct=-0.40)
+
+    assert scorer._paper_soft_ev_allowed(ev_result) is False
+
+
+def test_scorer_paper_soft_ev_allows_bootstrap_stage():
+    scorer = Scorer.__new__(Scorer)
+    scorer._paper_mode = True
+    scorer._cfg = {
+        "paper_validation": {
+            "enabled": True,
+            "ev_hard_gate_min_trades": 40,
+            "ev_bootstrap_max_deficit_pct": 0.15,
+            "ev_probation_max_deficit_pct": 0.10,
+        },
+        "ev_model": {"min_trades_for_ev": 20},
+    }
+    ev_result = SimpleNamespace(trade_count=19, ev_net_pct=-0.10)
+
+    assert scorer._paper_soft_ev_allowed(ev_result) is True
+
+
+def test_scorer_paper_soft_ev_allows_probation_stage():
+    scorer = Scorer.__new__(Scorer)
+    scorer._paper_mode = True
+    scorer._cfg = {
+        "paper_validation": {
+            "enabled": True,
+            "ev_hard_gate_min_trades": 40,
+            "ev_bootstrap_max_deficit_pct": 0.15,
+            "ev_probation_max_deficit_pct": 0.10,
+        },
+        "ev_model": {"min_trades_for_ev": 20},
+    }
+    ev_result = SimpleNamespace(trade_count=20, ev_net_pct=-0.05)
 
     assert scorer._paper_soft_ev_allowed(ev_result) is True
 
@@ -318,7 +384,8 @@ def test_scorer_paper_soft_ev_still_blocks_deeply_negative_expectancy():
         "paper_validation": {
             "enabled": True,
             "ev_hard_gate_min_trades": 40,
-            "ev_soft_block_max_deficit_pct": 0.50,
+            "ev_bootstrap_max_deficit_pct": 0.15,
+            "ev_probation_max_deficit_pct": 0.10,
         },
         "ev_model": {"min_trades_for_ev": 20},
     }

@@ -48,11 +48,11 @@ paper_validation:
   top_pairs_to_trade_override: 4
   threshold_relaxation: 7.0
   min_score_floor: 45.0
-  ev_hard_gate_min_trades: 999
+  ev_hard_gate_min_trades: 40     # After this, EV relax is disabled; only positive EV passes
   ml_hard_gate_min_trades: 999
-  ev_soft_block_max_deficit_pct: 1.00
   ev_relax_score_buffer: 3.0
   ev_bootstrap_max_deficit_pct: 0.15
+  ev_probation_max_deficit_pct: 0.10 # Stricter than bootstrap; used for the probation layer
   high_conviction_score_trigger: 64.0
   high_conviction_ev_max_deficit_pct: 0.50
   high_conviction_min_total_scale: 0.30

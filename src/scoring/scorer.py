@@ -187,11 +187,17 @@ class Scorer:
                 self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20),
             )
         )
+        min_trades = int(self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20))
         if ev_result.trade_count >= hard_gate_min_trades:
             return False
-        max_deficit = float(
-            paper_validation.get("ev_soft_block_max_deficit_pct", 0.50) or 0.50
-        )
+        if ev_result.trade_count < min_trades:
+            max_deficit = float(
+                paper_validation.get("ev_bootstrap_max_deficit_pct", 0.15) or 0.15
+            )
+        else:
+            max_deficit = float(
+                paper_validation.get("ev_probation_max_deficit_pct", 0.10) or 0.10
+            )
         return ev_result.ev_net_pct >= -max_deficit
 
     @property
