@@ -7,6 +7,7 @@ Last updated: 2026-05-18
 - Repo `/home/arwin/ninja_trader` is a git repo on branch `work`.
 - Clean commit `7cea795` is pushed to `origin/master` on `git@github.com:kiosarwin/ninja-trader.git`.
 - Production VM `35.231.37.107` is synced to that commit and bot is running in `tmux` session `ninja-vm`.
+- Fresh paper reset applied: persisted trade history and learned state were cleared, and the bot now seeds from `$75`.
 - Telegram heartbeat is off; `JIM SIMONS — FUND MANAGER REPORT` remains the primary Telegram cadence every 5 minutes.
 - Live secrets were sanitized out of tracked markdown/config files; runtime `.env` stays on the VM.
 
@@ -68,4 +69,4 @@ If the live process drifts, restart from the `tmux` session after confirming con
 
 Use this prompt in a new session:
 
-> Continue in `/home/arwin/ninja_trader`. Read `session.md` first. Current paper run is fresh from `$80`, config is already tuned for small-account paper sampling, and the bot is running in `tmux` session `ninja_trader`. Do not re-litigate GitHub or repo issues; there is no git repo here. Verify the live config and runtime state first, then only make surgical changes if a concrete bug or bottleneck is still present. Current key settings to preserve unless explicitly changed: `paper_starting_equity=80`, `risk_per_trade_pct=1.0`, `min_risk_usd=0.75`, `max_open_trades=4`, `max_direction_risk_pct=2.50`, isolated margin, and `edge_policy=false`. Prioritize checking `tmux capture-pane -pt ninja_trader`, `logs/futures_trader.log`, and whether the bot is healthy/opening trades as expected. Keep changes minimal and verify with the relevant tests before handoff.
+> Continue in `/home/arwin/ninja_trader`. Read `session.md` first. Current paper run is fresh from `$75`, config is already tuned for small-account paper sampling, and the bot is running in `tmux` session `ninja-vm`. Do not re-litigate GitHub or repo issues; there is no git repo here. Verify the live config and runtime state first, then only make surgical changes if a concrete bug or bottleneck is still present. Current key settings to preserve unless explicitly changed: `paper_starting_equity=75`, `risk_per_trade_pct=1.0`, `min_risk_usd=0.75`, `max_open_trades=4`, `max_direction_risk_pct=2.50`, isolated margin, and `edge_policy=false`. Prioritize checking `tmux capture-pane -pt ninja-vm`, `logs/futures_trader.log`, and whether the bot is healthy/opening trades as expected. Keep changes minimal and verify with the relevant tests before handoff.

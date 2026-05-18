@@ -164,7 +164,7 @@ class TradeManager:
         """Called on each price tick — checks exits for every open trade."""
         for symbol, trade in list(self._trades.items()):
             price = price_lookup.get(symbol)
-            if price is None:
+            if price is None or price <= 0:
                 continue
             await self._check_exits(trade, price)
 
@@ -180,7 +180,7 @@ class TradeManager:
         result = []
         for symbol, trade in self._trades.items():
             price = price_map.get(symbol)
-            if price is None:
+            if price is None or price <= 0:
                 continue
             entry = trade.setup.entry_price
             size = trade.setup.size_usd
@@ -211,6 +211,10 @@ class TradeManager:
     # ------------------------------------------------------------------ #
 
     async def _check_exits(self, trade: OpenTrade, price: float) -> None:
+        if price <= 0:
+            log.warning("[%s] Ignoring invalid price tick %.4f", trade.symbol, price)
+            return
+
         # Update MFE/MAE and time-tracking
         now = time.time()
         r = trade.setup.r_distance

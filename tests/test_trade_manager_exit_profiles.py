@@ -81,3 +81,42 @@ def test_trade_manager_uses_sleeve_specific_exit_profile(monkeypatch, tmp_path):
     assert trade.remaining_contracts == pytest.approx(0.60)
     assert trade.setup.stop_loss == pytest.approx(100.0)
     assert trade.trailing_stop == pytest.approx(100.2)
+
+
+def test_trade_manager_ignores_invalid_zero_prices(monkeypatch, tmp_path):
+    cfg = {"exit": {}}
+    executor = _FakeExecutor()
+    risk = _FakeRisk()
+    monkeypatch.setattr(TradeManager, "STATE_PATH", tmp_path / "open_trades.json")
+    manager = TradeManager(client=object(), executor=executor, risk=risk, cfg=cfg)
+
+    setup = TradeSetup(
+        symbol="ETH/USDT:USDT",
+        direction="short",
+        entry_price=100.0,
+        stop_loss=105.0,
+        tp1=97.0,
+        tp2=94.0,
+        tp3=90.0,
+        size_usd=100.0,
+        size_contracts=1.0,
+        leverage=5,
+        r_distance=5.0,
+        strategy_sleeve="neutral",
+        atr=2.0,
+        risk_pct=1.0,
+        exit_profile="default",
+        tp1_size_pct=0.40,
+        tp2_size_pct=0.35,
+        trail_size_pct=0.25,
+        breakeven_trigger_r=0.9,
+        trailing_atr_multiplier=1.4,
+        max_hold_duration_s=9999,
+    )
+
+    trade = asyncio.run(manager.open(setup))
+    assert trade is not None
+
+    asyncio.run(manager.monitor_all({"ETH/USDT:USDT": 0.0}))
+    assert "ETH/USDT:USDT" in manager.open_symbols
+    assert manager.get_floating_pnl({"ETH/USDT:USDT": 0.0}) == []

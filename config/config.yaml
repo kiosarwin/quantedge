@@ -15,7 +15,7 @@ trading:
   mode: paper                      # paper | live | backtest
   exploration_mode: false          # false = paper validates production gates instead of taking exploratory losses
   base_currency: USDT
-  paper_starting_equity: 80        # Reset fresh paper run from $80
+  paper_starting_equity: 75        # Reset fresh paper run from $75
   min_score_threshold: 45          # Lower paper threshold so valid R/S/X candidates can convert into real samples
   max_open_trades: 1               # One position until the bot proves positive expectancy
   top_pairs_to_trade: 1
