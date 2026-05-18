@@ -6,6 +6,7 @@ Last updated: 2026-05-19
 
 - Repo `/home/arwin/ninja_trader` is a git repo on branch `work`.
 - Strategy-stack alignment changes are in progress: `neutral` is residual routing only, live/paper allowlists center on `trend_following` and `reversal`, and `compression_breakout` stays experimental.
+- Remaining docs audited: `GUIDE.md` and `QUANT_MINI_ROADMAP.md` now also state that `neutral` is a routing/filter state, not alpha.
 - Commit `3fdaa16` is pushed to `origin/master` and the VM is synced/restarted from that commit.
 - Fresh paper reset remains in effect: persisted trade history and learned state were cleared, and the bot seeds from `$75`.
 - Telegram heartbeat is off; `JIM SIMONS — FUND MANAGER REPORT` remains the primary Telegram cadence every 5 minutes.

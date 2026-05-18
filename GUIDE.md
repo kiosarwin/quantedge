@@ -283,7 +283,7 @@ Uses EMA 21/55/200 alignment and RSI.
 **Funding Sentiment (weight 10)**
 - Contrarian signal: very high positive funding → crowded longs → short bias
 - Very negative funding → crowded shorts → long bias
-- Near-zero funding = neutral
+- Near-zero funding = neutral filter state, not a sleeve by itself
 
 **Order Book (weight 10)**
 - Bid/ask volume ratio above 1.5 threshold = bullish pressure

@@ -22,6 +22,8 @@ Dengan kata lain:
 - **rule engine** menjadi penyedia fitur dan guardrail
 - **risk manager** menjadi pagar keras
 
+Sampai migrasi penuh selesai, sleeve alpha operasional tetap dibaca sebagai `trend_following`, `reversal`, dan `compression_breakout`; `neutral` adalah state routing residual, bukan alpha.
+
 ## 2) Prinsip Desain
 
 1. **Satu keputusan, banyak bukti**
