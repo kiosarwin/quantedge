@@ -236,6 +236,7 @@ telegram:
   chat_id: ""       # Set via .env: TELEGRAM_CHAT_ID
   heartbeat_interval_minutes: 1   # Short account-summary heartbeat every minute
   cycle_report_interval_minutes: 5 # Detailed Jim Simons fund-manager report every 5 minutes
+  bootstrap_audit_interval_hours: 12 # Separate bootstrap audit report cadence (0 = off)
   pnl_update_interval_minutes: 1  # Floating P&L update interval (0 = off)
 
 safety:

@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import httpx
@@ -469,6 +470,33 @@ class TelegramNotifier:
 
         lines.append(f"══════════════════════")
         lines.append(f"_The model never sleeps, Boss. — Jim_ 🧮🥷")
+        await self._send("\n".join(lines))
+
+    async def bootstrap_audit_report(
+        self,
+        report_lines: list[str],
+        *,
+        cycle_num: int = 0,
+        interval_hours: float = 12.0,
+    ) -> None:
+        """Separate bootstrap audit report, sent on its own cadence."""
+        if not self._enabled or not report_lines:
+            return
+        now = datetime.now(UTC).strftime("%H:%M:%S UTC")
+        header = "🧪 *BOOTSTRAP AUDIT REPORT*"
+        if cycle_num > 0:
+            header += f"  #{cycle_num}"
+        cadence = f"`Cadence: {interval_hours:.0f}h`"
+        lines = [
+            header,
+            f"`{now}`",
+            cadence,
+            f"`Session: {self._active_session_label()}`",
+            "══════════════════════",
+            *report_lines,
+            "══════════════════════",
+            "_Separate from Jim Simons report — bootstrap audit only._",
+        ]
         await self._send("\n".join(lines))
 
     async def startup(self, mode: str, equity: float) -> None:

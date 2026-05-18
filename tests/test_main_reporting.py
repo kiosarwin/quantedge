@@ -74,7 +74,33 @@ def test_maybe_send_performance_report_runs_on_interval():
     assert sent["open_positions"] == [{"symbol": "ETH/USDT:USDT"}]
     assert sent["closed_positions"][0].symbol == "BTC/USDT:USDT"
     assert sent["starting_equity"] == 80.0
-    assert sent["bootstrap_audit"][0] == "Bootstrap Audit"
+    assert "bootstrap_audit" not in sent
+
+
+def test_maybe_send_bootstrap_audit_report_runs_on_separate_12h_cadence():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    sent = {}
+
+    class _Telegram:
+        async def bootstrap_audit_report(self, *args, **kwargs):
+            sent["args"] = args
+            sent["kwargs"] = kwargs
+
+    bot._cfg = {"telegram": {"bootstrap_audit_interval_hours": 12}}
+    bot._last_bootstrap_audit_ts = time.time() - (12 * 3600) - 1
+    bot._bootstrap_audit_lines = lambda lifecycle_report=None: ["Bootstrap Audit", "Phase: `BOOTSTRAP` | N `1`"]  # type: ignore[assignment]
+    bot._telegram = _Telegram()
+
+    asyncio.run(
+        bot._maybe_send_bootstrap_audit_report(
+            lifecycle_report=SimpleNamespace(counts={}, recommendation="PAPER_ONLY"),
+            cycle_num=77,
+        )
+    )
+
+    assert sent["kwargs"]["cycle_num"] == 77
+    assert sent["kwargs"]["interval_hours"] == 12.0
+    assert sent["args"][0] == ["Bootstrap Audit", "Phase: `BOOTSTRAP` | N `1`"]
 
 
 def test_maybe_send_performance_report_sends_immediately_after_start():
@@ -96,6 +122,7 @@ def test_maybe_send_performance_report_sends_immediately_after_start():
     bot._cfg = {"telegram": {"cycle_report_interval_minutes": 5}}
     bot._safety = {"performance_report_interval_minutes": 5}
     bot._tg_cycle_report_ts = time.time()
+    bot._last_bootstrap_audit_ts = time.time()
     bot._startup_cycle_report_pending = True
     bot._learner = SimpleNamespace(_trade_log=[])
     bot._fund_mgr = SimpleNamespace(bonus=0.0, _recent_performance_mult=lambda trade_log: 1.0)

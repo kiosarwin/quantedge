@@ -184,6 +184,7 @@ class NinjaTrader:
         self._tg_cycle_report_ts = 0.0
         self._startup_cycle_report_pending = True
         self._last_fm_report_ts = 0.0       # for fund manager report interval
+        self._last_bootstrap_audit_ts = time.time()  # separate bootstrap audit cadence
         self._live_transition_done = False  # guard against double-transition
         self._last_monthly_reset_ts = time.time()
         self._last_reconcile_ts = 0.0
@@ -590,6 +591,10 @@ class NinjaTrader:
                     total_trades=_n_trades,
                     win_rate=_win_rate,
                     sharpe=_sharpe,
+                    cycle_num=_cycle,
+                )
+                await self._maybe_send_bootstrap_audit_report(
+                    lifecycle_report=lifecycle_report,
                     cycle_num=_cycle,
                 )
 
@@ -1548,7 +1553,29 @@ class NinjaTrader:
             regime_thresholds=self._trading.get("regime_thresholds", {}),
             jim_bonus=self._fund_mgr.bonus,
             starting_equity=self._starting_equity,
-            bootstrap_audit=self._bootstrap_audit_lines(lifecycle_report),
+        )
+
+    async def _maybe_send_bootstrap_audit_report(
+        self,
+        lifecycle_report: dict | None = None,
+        cycle_num: int = 0,
+    ) -> None:
+        audit_hours = float(
+            self._cfg.get("telegram", {}).get("bootstrap_audit_interval_hours", 12) or 0
+        )
+        if audit_hours <= 0:
+            return
+        report_interval = audit_hours * 3600
+        if time.time() - self._last_bootstrap_audit_ts < report_interval:
+            return
+        lines = self._bootstrap_audit_lines(lifecycle_report)
+        if not lines:
+            return
+        self._last_bootstrap_audit_ts = time.time()
+        await self._telegram.bootstrap_audit_report(
+            lines,
+            cycle_num=cycle_num,
+            interval_hours=audit_hours,
         )
 
     async def _transition_to_live(self) -> None:

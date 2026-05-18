@@ -154,3 +154,33 @@ def test_cycle_report_includes_active_session_in_header(monkeypatch):
 
     assert "JIM SIMONS — FUND MANAGER REPORT" in sent["message"]
     assert "Session: *London*" in sent["message"]
+
+
+def test_bootstrap_audit_report_uses_separate_header(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        "src.notifications.telegram.active_market_session_label",
+        lambda: "Asia",
+    )
+
+    asyncio.run(
+        notifier.bootstrap_audit_report(
+            ["Phase: `BOOTSTRAP` | N `12`", "Overall: WR `50.0%`"],
+            cycle_num=77,
+            interval_hours=12,
+        )
+    )
+
+    assert "BOOTSTRAP AUDIT REPORT" in sent["message"]
+    assert "`Cadence: 12h`" in sent["message"]
+    assert "`Session: Asia`" in sent["message"]
+    assert "Separate from Jim Simons report" in sent["message"]
