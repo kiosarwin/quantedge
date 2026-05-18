@@ -191,6 +191,12 @@ class NinjaTrader:
         self._starting_equity: float = 0.0  # set after equity seed, used for total PnL display
         self._runtime_error_count = 0
         self._heartbeat_fail_count = 0
+        risk_state = getattr(self._risk, "state", None)
+        self._ml_gate_state = {
+            "day_start_ts": float(getattr(risk_state, "day_start_ts", time.time()) or time.time()),
+            "candidate_count": 0,
+            "veto_count": 0,
+        }
 
         # Feed learner's trade log into the scorer's EV model each tick
         self._scorer.set_trade_log(self._learner._trade_log)
@@ -264,9 +270,49 @@ class NinjaTrader:
         return int(
             self._paper_validation.get(
                 "ml_hard_gate_min_trades",
-                self._cfg.get("ml", {}).get("hard_gate_min_trades", 20),
+                self._cfg.get("ml", {}).get("hard_gate_min_trades", 60),
             )
         )
+
+    def _ml_gate_config(self) -> dict:
+        return self._cfg.get("ml", {})
+
+    def _sync_ml_gate_budget(self) -> None:
+        risk_state = getattr(self._risk, "state", None)
+        current_day_start = float(getattr(risk_state, "day_start_ts", 0.0) or 0.0)
+        if self._ml_gate_state.get("day_start_ts") != current_day_start:
+            self._ml_gate_state = {
+                "day_start_ts": current_day_start,
+                "candidate_count": 0,
+                "veto_count": 0,
+            }
+
+    def _ml_veto_budget_allows(self) -> tuple[bool, str]:
+        self._sync_ml_gate_budget()
+        cfg = self._ml_gate_config()
+        max_daily_vetoes = int(cfg.get("max_daily_vetoes", 2) or 0)
+        if max_daily_vetoes <= 0:
+            self._ml_gate_state["candidate_count"] += 1
+            return True, "veto budget disabled"
+
+        self._ml_gate_state["candidate_count"] += 1
+        veto_count = int(self._ml_gate_state["veto_count"])
+        if veto_count >= max_daily_vetoes:
+            return False, f"daily ML veto budget exhausted ({veto_count}/{max_daily_vetoes})"
+
+        min_candidates = int(cfg.get("veto_budget_min_candidates", 12) or 12)
+        candidate_count = int(self._ml_gate_state["candidate_count"])
+        max_veto_rate = float(cfg.get("max_veto_rate", 0.20) or 0.20)
+        if candidate_count >= min_candidates:
+            veto_rate = veto_count / max(1, candidate_count)
+            if veto_rate > max_veto_rate:
+                return False, f"ML veto rate {veto_rate:.0%} > {max_veto_rate:.0%}"
+
+        return True, "ok"
+
+    def _record_ml_veto(self) -> None:
+        self._sync_ml_gate_budget()
+        self._ml_gate_state["veto_count"] = int(self._ml_gate_state["veto_count"]) + 1
 
     def _paper_high_conviction_candidate(self, breakdown: SignalBreakdown, threshold: float) -> bool:
         ev = breakdown.ev_result
@@ -813,37 +859,52 @@ class NinjaTrader:
                     }
                     ml_p_win, ml_ready = self._ml.predict(scores_dict, b.total_score)
                     ml_threshold = self._ml.dynamic_p_win_threshold
-                    # Phase 2 gate: ML p_win only closes entries after 20 real closed trades.
+                    # Phase 2 gate: ML p_win only closes entries after the live hard-gate minimum.
                     # Prevents ML (trained partly on shadow trades) from blocking exploration
                     # during bootstrap when CV accuracy is inflated by small-sample overfit.
                     real_trades = len(self._learner._trade_log)
+                    ml_cfg = self._ml_gate_config()
                     ml_hard_gate_min_trades = (
                         self._paper_ml_hard_gate_min_trades()
                         if self._paper_validation_enabled()
-                        else int(self._cfg.get("ml", {}).get("hard_gate_min_trades", 20))
+                        else int(ml_cfg.get("hard_gate_min_trades", 60))
                     )
                     if ml_ready and real_trades >= ml_hard_gate_min_trades and ml_p_win < ml_threshold:
+                        ml_veto_allowed, ml_budget_reason = self._ml_veto_budget_allows()
+                        if ml_veto_allowed:
+                            self._record_ml_veto()
+                            log.info(
+                                "ML rejected %s — p_win=%.1f%% < threshold=%.1f%%",
+                                b.symbol, ml_p_win * 100, ml_threshold * 100,
+                            )
+                            self._dataset_logger.log_no_trade(b, "ml_rejected", snap=_snap)
+                            self._rej.log(
+                                stage="ml_rejected",
+                                reason=f"ml_p_win={ml_p_win:.3f} < thresh={ml_threshold:.3f}",
+                                breakdown=b, threshold_required=_thresh,
+                                ml_p_win=ml_p_win, ml_threshold=ml_threshold,
+                                funding_rate=_fr,
+                            )
+                            if self._shadow:
+                                self._shadow.record_rejected(b, stage="ml_rejected", features=scores_dict)
+                            continue
                         log.info(
-                            "ML rejected %s — p_win=%.1f%% < threshold=%.1f%%",
-                            b.symbol, ml_p_win * 100, ml_threshold * 100,
+                            "ML soft-pass %s — %s; continuing in size-only mode",
+                            b.symbol, ml_budget_reason,
                         )
-                        self._dataset_logger.log_no_trade(b, "ml_rejected", snap=_snap)
-                        self._rej.log(
-                            stage="ml_rejected",
-                            reason=f"ml_p_win={ml_p_win:.3f} < thresh={ml_threshold:.3f}",
-                            breakdown=b, threshold_required=_thresh,
-                            ml_p_win=ml_p_win, ml_threshold=ml_threshold,
-                            funding_rate=_fr,
-                        )
-                        if self._shadow:
-                            self._shadow.record_rejected(b, stage="ml_rejected", features=scores_dict)
-                        continue
                     # Progressive regime gate: exploration / soft-penalty / hard-lock
                     regime_key = b.regime.value if b.regime else "chaos"
                     if self._paper_validation_enabled():
                         allow, regime_scale, regime_reason = True, 1.0, "paper strategy-only path"
                     else:
                         allow, regime_scale, regime_reason = self._ml.regime_gate(regime_key)
+                        regime_hard_lock_min_trades = int(ml_cfg.get("regime_hard_lock_min_trades", 30) or 30)
+                        if not allow and real_trades < regime_hard_lock_min_trades:
+                            log.info(
+                                "ML regime hard-lock deferred %s (%s) — continuing in size-only mode",
+                                regime_key, regime_reason,
+                            )
+                            allow, regime_scale, regime_reason = True, 0.5, f"deferred {regime_reason}"
                         if not allow:
                             log.info("Regime hard-lock %s (%s) — skip %s", regime_key, regime_reason, b.symbol)
                             self._dataset_logger.log_no_trade(b, "ml_regime_gate", snap=_snap)

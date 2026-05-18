@@ -211,6 +211,44 @@ def test_paper_ml_hard_gate_min_trades_uses_paper_override():
     assert bot._paper_ml_hard_gate_min_trades() == 40
 
 
+def test_ml_veto_budget_caps_rejections_and_resets_each_day():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._cfg = {
+        "ml": {
+            "max_daily_vetoes": 2,
+            "max_veto_rate": 0.50,
+            "veto_budget_min_candidates": 2,
+        }
+    }
+    bot._risk = SimpleNamespace(state=SimpleNamespace(day_start_ts=100.0))
+    bot._ml_gate_state = {
+        "day_start_ts": 100.0,
+        "candidate_count": 0,
+        "veto_count": 0,
+    }
+
+    allowed, reason = bot._ml_veto_budget_allows()
+    assert allowed is True
+    assert reason == "ok"
+
+    bot._record_ml_veto()
+    allowed, reason = bot._ml_veto_budget_allows()
+    assert allowed is True
+    assert reason == "ok"
+
+    bot._record_ml_veto()
+    allowed, reason = bot._ml_veto_budget_allows()
+    assert allowed is False
+    assert reason == "daily ML veto budget exhausted (2/2)"
+
+    bot._risk.state.day_start_ts = 200.0
+    allowed, reason = bot._ml_veto_budget_allows()
+    assert allowed is True
+    assert reason == "ok"
+    assert bot._ml_gate_state["candidate_count"] == 1
+    assert bot._ml_gate_state["veto_count"] == 0
+
+
 def test_paper_trade_scope_allows_only_long_trending_expansion_by_default():
     bot = NinjaTrader.__new__(NinjaTrader)
     bot._trading = {"mode": "paper"}

@@ -67,6 +67,13 @@ paper_validation:
     - distribution
     - liquidity_sweep
 
+ml:
+  hard_gate_min_trades: 60
+  regime_hard_lock_min_trades: 30
+  max_daily_vetoes: 2
+  max_veto_rate: 0.20
+  veto_budget_min_candidates: 12
+
 risk:
   risk_per_trade_pct: 1.0          # Conservative until positive expectancy is proven
   max_risk_per_trade_pct: 1.25     # Hard cap while rebuilding edge
