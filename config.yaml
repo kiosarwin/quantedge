@@ -1,0 +1,119 @@
+# ============================================================
+#  NINJA SMART TRADER — Configuration
+#  Edit this file before running the bot
+# ============================================================
+
+# ── API ──────────────────────────────────────────────────────
+api:
+  key: ""
+  secret: ""
+  testnet: false          # true → use Binance Testnet
+
+# ── Trading Mode ─────────────────────────────────────────────
+# "paper"    → simulate trades with real market data (safe)
+# "live"     → real money on Binance Spot
+# "backtest" → historical simulation (run backtester.py directly)
+mode: "paper"
+
+# ── Capital ──────────────────────────────────────────────────
+capital:
+  total_usdt: 1000.0
+  max_position_pct: 0.20     # max 20 % of capital per trade
+  min_position_pct: 0.10     # min 10 % of capital per trade
+  max_open_positions: 3
+
+# ── Scoring ──────────────────────────────────────────────────
+scoring:
+  min_score: 67              # only trade if score ≥ 75
+  weights:
+    trend_strength:    25
+    volume_expansion:  20
+    structure_quality: 20
+    momentum_alignment: 15
+    btc_correlation:   10
+    volatility_condition: 10
+
+# ── Entry ────────────────────────────────────────────────────
+entry:
+  strategies:
+    - "breakout_retest"      # breakout + pullback + rejection
+    - "pullback_ema"         # retracement to EMA 50
+    - "liquidity_sweep"      # fake breakdown → recovery
+
+# ── Risk Management ──────────────────────────────────────────
+risk:
+  stop_loss_atr_multiplier: 2.0
+  take_profit_targets:
+    - pct: 0.10              # TP1 → +10 %
+      size_pct: 0.40         # sell 40 % of position
+    - pct: 0.18              # TP2 → +18 %
+      size_pct: 0.35         # sell 35 %
+    - pct: 0.25              # TP3 → +25 %
+      size_pct: 0.25         # sell remaining 25 %
+  trailing_stop_after_tp1: true
+  trailing_stop_pct: 0.05    # 5 % trailing after TP1 hit
+
+# ── Pair Scanner ─────────────────────────────────────────────
+scanner:
+  quote_asset: "USDT"
+  min_daily_volume_usdt: 5_000_000
+  max_pairs_to_scan: 60      # top 60 by volume → run scoring
+  top_n_pairs: 3             # trade only top 3 scoring pairs
+  excluded_pairs:
+    - "USDCUSDT"
+    - "BUSDUSDT"
+    - "TUSDUSDT"
+    - "FDUSDUSDT"
+    - "DAIUSDT"
+
+# ── Timeframes ───────────────────────────────────────────────
+timeframes:
+  primary: "4h"              # trend / regime
+  secondary: "1h"            # structure / scoring
+  entry: "15m"               # precise entry timing
+
+# ── BTC Safety Gate ──────────────────────────────────────────
+btc:
+  safety_enabled: true
+  dump_threshold_4h_pct: -3.0   # BTC −3 % on 4H → halt alts
+  ema_period: 50                 # EMA used for BTC trend
+  resume_threshold_pct: 1.0     # BTC recovers +1 % → re-enable
+
+# ── Indicators ───────────────────────────────────────────────
+indicators:
+  ema_fast: 50
+  ema_slow: 200
+  atr_period: 14
+  volume_ma_period: 20
+  rsi_period: 14
+  adx_period: 14
+
+# ── Market Structure ─────────────────────────────────────────
+structure:
+  swing_lookback: 10         # bars to look back for swing H/L
+  bos_confirmation_bars: 2   # bars needed to confirm BOS
+
+# ── Market Regime ────────────────────────────────────────────
+regime:
+  adx_trending_threshold: 25
+  atr_high_vol_multiplier: 2.5
+
+# ── Backtesting ──────────────────────────────────────────────
+backtest:
+  start_date: "2024-01-01"
+  end_date:   "2024-12-31"
+  initial_capital: 10000.0
+  fee_pct: 0.001             # 0.1 % taker fee
+
+# ── Logging ──────────────────────────────────────────────────
+logging:
+  level: "INFO"
+  file: "logs/ninja_trader.log"
+  trade_db: "logs/trades.db"
+
+# ── Adaptive System ──────────────────────────────────────────
+adaptive:
+  enabled: true
+  min_trades_for_adaptation: 20
+  adaptation_interval_hours: 24
+  weight_adjustment_step: 2   # ± 2 points per adaptation cycle

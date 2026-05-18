@@ -1,0 +1,374 @@
+# ============================================================
+#  NINJA TRADER — Futures Edition (config.yaml)
+#  Binance USDT-margined Perpetual Futures
+# ============================================================
+
+exchange:
+  name: binance_futures
+  testnet: true                     # Set false only when going live
+  api_key: ""                      # Set via .env: BINANCE_API_KEY
+  api_secret: ""                   # Set via .env: BINANCE_API_SECRET
+  recv_window: 10000
+  # fapi_base_url: "https://fapi1.binance.com"   # Uncomment if fapi.binance.com is blocked
+
+trading:
+  mode: paper                      # paper | live | backtest
+  exploration_mode: false          # false = paper validates production gates instead of taking exploratory losses
+  base_currency: USDT
+  paper_starting_equity: 80        # Reset fresh paper run from $80
+  min_score_threshold: 45          # Lower paper threshold so valid R/S/X candidates can convert into real samples
+  max_open_trades: 1               # One position until the bot proves positive expectancy
+  top_pairs_to_trade: 1
+  scan_pool_size: 25             # Keep cycle fast enough to reach entries in a single pass
+  scan_interval_seconds: 60
+  candle_refresh_seconds: 30
+  signal_confirmation_scans: 2   # require N consecutive scans above threshold
+  signal_max_age_seconds: 300    # expire signal if not confirmed within 5 min
+  regime_thresholds:             # override min_score_threshold per regime
+    trending_expansion: 52       # still above base, but low enough for paper sample collection
+    accumulation_compression: 50 # compression remains secondary but no longer impossible in paper
+    distribution: 50             # allows short-side paper sampling when reversal conditions are present
+
+# ── Paper Validation Throughput ──────────────────────────────────────────────
+# Purpose: collect enough samples in paper mode without weakening live-mode
+# guardrails. This is a controlled relaxation layer, not a live trading policy.
+paper_validation:
+  enabled: true
+  allowed_directions:
+    - long
+    - short
+  allowed_regimes:
+    - trending_expansion
+    - distribution
+  allowed_strategy_sleeves:
+    - trend_following
+    - reversal
+    - neutral
+  max_open_trades_override: 4
+  top_pairs_to_trade_override: 4
+  threshold_relaxation: 7.0
+  min_score_floor: 45.0
+  ev_hard_gate_min_trades: 999
+  ml_hard_gate_min_trades: 999
+  ev_soft_block_max_deficit_pct: 1.00
+  ev_relax_score_buffer: 3.0
+  ev_bootstrap_max_deficit_pct: 0.15
+  high_conviction_score_trigger: 64.0
+  high_conviction_ev_max_deficit_pct: 0.50
+  high_conviction_min_total_scale: 0.30
+  high_conviction_allowed_regimes:
+    - trending_expansion
+  high_conviction_allowed_sm_phases:
+    - liquidity_sweep
+    - trending
+  high_conviction_short_allowed_regimes:
+    - distribution
+  high_conviction_short_allowed_sm_phases:
+    - distribution
+    - liquidity_sweep
+
+risk:
+  risk_per_trade_pct: 1.0          # Conservative until positive expectancy is proven
+  max_risk_per_trade_pct: 1.25     # Hard cap while rebuilding edge
+  daily_loss_cap_pct: 5.0          # Stop trading if down $5 in a day
+  weekly_loss_cap_pct: 0.0         # Disabled in paper so valid strategy samples are not frozen by one bad week
+  max_drawdown_pct: 25.0           # Keep a hard emergency brake, but don't block paper sampling too early
+  min_rr_ratio: 2.0                # Only take trades with R:R >= 2
+  max_leverage: 10                 # Allow up to 10x (needed for $100 meaningful positions)
+  default_leverage: 5              # 5x default — $1.50 risk controls ~$37 notional
+  stop_loss_atr_multiplier: 1.5
+  min_notional_usd: 5.0            # Binance Futures minimum order notional = $5
+  min_risk_usd: 0.75               # Fit $80 paper account while keeping a non-zero floor
+  cooldown_after_loss_streak: 2    # After N consecutive losses, pause new entries temporarily
+  cooldown_minutes: 30
+  max_symbol_risk_pct: 1.25        # total concurrent risk allowed on one asset
+  max_direction_risk_pct: 2.50     # total concurrent risk allowed per side for $80 paper sampling
+
+exit:
+  tp1_r_multiple: 1.5
+  tp2_r_multiple: 2.0
+  tp1_size_pct: 0.50
+  tp2_size_pct: 0.30
+  trail_size_pct: 0.20
+  breakeven_trigger_r: 1.0
+  trailing_atr_multiplier: 1.5
+  tp2_trailing_stop_pct: 0.15
+  max_hold_duration_s: 172800
+
+exit_profiles:
+  trend_following:
+    tp1_r_multiple: 1.8
+    tp2_r_multiple: 2.8
+    tp3_r_multiple: 4.0
+    tp1_size_pct: 0.35
+    tp2_size_pct: 0.35
+    trail_size_pct: 0.30
+    breakeven_trigger_r: 1.0
+    trailing_atr_multiplier: 1.8
+    max_hold_duration_s: 259200
+  reversal:
+    tp1_r_multiple: 1.0
+    tp2_r_multiple: 1.6
+    tp3_r_multiple: 2.2
+    tp1_size_pct: 0.50
+    tp2_size_pct: 0.30
+    trail_size_pct: 0.20
+    breakeven_trigger_r: 0.8
+    trailing_atr_multiplier: 1.1
+    max_hold_duration_s: 86400
+
+filters:
+  min_24h_volume_usdt: 100_000_000
+  min_price_usdt: 0.001
+  blacklisted_pairs:
+    - USDCUSDT
+    - BUSDUSDT
+    - TUSDUSDT
+    - USDTUSDT
+  stablecoins:
+    - USDC
+    - BUSD
+    - TUSD
+    - DAI
+    - FDUSD
+
+timeframes:
+  primary: 1h
+  higher: 4h
+  lower: 15m
+  entry: 5m
+
+indicators:
+  atr_period: 14
+  adx_period: 14                        # ADX trend strength period
+  ema_fast: 21
+  ema_slow: 55
+  ema_trend: 200
+  rsi_period: 14
+  volume_spike_multiplier: 2.0
+  volume_lookback: 20
+  oi_change_threshold_pct: 1.0
+  funding_high_threshold: 0.03
+  funding_low_threshold: -0.01
+  btc_correlation_lookback: 48
+  min_btc_correlation: 0.5
+
+structure:
+  swing_lookback: 10
+  bos_confirmation_candles: 2
+  liquidity_sweep_pct: 0.3
+
+order_book:
+  depth_levels: 10
+  imbalance_threshold: 1.5
+  wall_size_multiplier: 5.0
+  absorption_volume_mult: 3.0
+
+scoring:
+  weights:
+    trend_strength: 20
+    volume_confirmation: 15
+    structure_quality: 20
+    open_interest: 15
+    funding_sentiment: 10
+    order_book: 10
+    volatility: 10
+  dynamic_adjustment: true
+  adjustment_rate: 0.02
+
+strategy:
+  trend_min_score: 65
+  trend_min_structure: 58
+  trend_long_only: true
+  enable_compression_breakout: false
+  compression_min_structure: 60
+  reversal_max_volatility: 75
+  allow_long_reversal: true
+  allow_short_reversal: true
+  short_reversal_require_distribution: true
+  short_reversal_min_sm_score: 78
+  short_reversal_min_structure: 58
+  short_reversal_min_volume: 35
+  dispersion_warn: 28
+  dispersion_high: 38
+
+learning:
+  min_trades_to_adjust: 20
+  lookback_trades: 100
+  save_path: "models/learning_state_futures.json"
+  trade_log_path: "data/trades/trade_log_futures.parquet"
+
+backtest:
+  start_date: "2025-04-19"
+  end_date: "2026-04-19"
+  initial_capital: 10000
+  commission_pct: 0.04
+  slippage_pct: 0.10
+  score_threshold: 65          # Match live threshold — only take high-conviction signals
+
+logging:
+  level: INFO
+  log_file: "logs/futures_trader.log"
+  trade_log_file: "logs/futures_trades.log"
+  max_bytes: 10_485_760
+  backup_count: 5
+
+# ── Telegram Alerts ─────────────────────────────────────────────────────────
+telegram:
+  token: ""         # Set via .env: TELEGRAM_TOKEN
+  chat_id: ""       # Set via .env: TELEGRAM_CHAT_ID
+  heartbeat_interval_minutes: 1   # Enabled for quick VM Telegram verification
+  cycle_report_interval_minutes: 0 # Detailed fund-manager Telegram report cadence (0 = off)
+  pnl_update_interval_minutes: 1  # Floating P&L update interval (0 = off)
+
+safety:
+  pause_on_extreme_volatility: true
+  extreme_vol_atr_multiplier: 3.0
+  max_consecutive_losses: 0              # Disable hard streak stop in paper; rely on core strategy + sizing
+  api_retry_attempts: 3
+  api_retry_delay_seconds: 5
+  heartbeat_interval_seconds: 30
+  auto_live_on_readiness: false          # Manual promotion only after audited forward results
+  min_live_balance_usd: 10.0             # Abort live transition if balance below this
+  performance_report_interval_trades: 10 # Send fund manager report every N closed trades
+  close_positions_on_shutdown: false     # Preserve positions on service restart/shutdown; use manual panic close for emergencies
+  heartbeat_fail_kill_switch_count: 6    # Repeated balance/API failure -> freeze new entries
+  runtime_error_kill_switch_count: 5     # Repeated main-loop exceptions -> freeze new entries
+  equity_mismatch_tolerance_pct: 20.0    # Large mismatch between bot equity and exchange equity triggers kill-switch
+
+# ── Cohort Edge Policy ───────────────────────────────────────────────────────
+# Blocks setup families that already show negative expectancy in closed trades.
+edge_policy:
+  enabled: false
+  lookback_trades: 80
+  min_cohort_trades: 2
+  min_symbol_trades: 3
+  min_sm_phase_trades: 4
+  min_regime_sm_direction_trades: 4
+  min_reversal_cohort_trades: 4
+  block_winrate_below: 0.35
+  block_profit_factor_below: 0.80
+  support_winrate_at_least: 0.55
+  support_profit_factor_at_least: 1.20
+  max_support_boost: 1.15
+  block_bad_symbols: true
+  long_only: false
+  allowed_regimes:
+    - trending_expansion
+    - distribution
+  allowed_sm_phases:
+    - neutral
+    - trending
+    - accumulation
+    - liquidity_sweep
+    - distribution
+  allowed_strategy_sleeves:
+    - trend_following
+    - reversal
+  min_trend_strength: 65.0
+  min_volume_confirmation: 25.0
+  min_reversal_volume_confirmation: 25.0
+  max_volatility_score: 35.0
+  max_reversal_volatility_score: 100.0
+
+# ── Strategy Lifecycle / Cohort Health ───────────────────────────────────────
+# Each cohort graduates: RESEARCH -> PAPER_VALIDATION -> SMALL_LIVE -> ACTIVE.
+# Negative cohorts are degraded/disabled automatically for live admission.
+lifecycle:
+  enabled: true
+  default_paper_only: true
+  research_min_trades: 5
+  paper_validation_min_trades: 12
+  small_live_min_trades: 25
+  active_min_trades: 40
+  min_profit_factor: 1.10
+  min_expectancy_usd: 0.00
+  min_win_rate: 0.45
+  max_outlier_share: 0.60
+  max_stop_hit_rate: 0.55
+  disable_profit_factor_below: 0.95
+  disable_expectancy_usd_below: -0.25
+  disable_max_drawdown_usd: 25.0
+  cohort_key_fields:
+    - strategy_name
+    - market_regime
+    - session
+    - volatility_bucket
+    - trend_bucket
+    - signal_type
+    - asset
+    - timeframe
+    - direction
+
+# ── Smart Money Detection ────────────────────────────────────────────────────
+smart_money:
+  oi_accumulation_threshold_pct: 0.2    # OI rise % per snapshot to flag accumulation
+  oi_distribution_threshold_pct: -0.1   # OI fall % per snapshot to flag distribution
+  oi_baseline_seconds: 3600             # OI comparison window (1h gives real accumulation signal)
+  price_stagnation_pct: 0.5             # Max price change % to be "flat"
+  funding_extreme_threshold: 0.05       # |funding| above this = extreme
+  volume_buildup_periods: 5             # Candles to check for gradual vol increase
+  min_smart_money_score: 60             # Minimum SM score to allow trade
+  ls_long_extreme: 0.70                 # L/S ratio: > 0.70 = crowded longs (contrarian bearish)
+  ls_short_extreme: 0.30                # L/S ratio: < 0.30 = crowded shorts (contrarian bullish)
+
+# ── Edge Detector (pre-EV intelligence layer) ───────────────────────────────
+# mode: observer (default, log-only) → soft_gate (size_mult applied) → active_gate (BLOCK suppresses)
+# Recommended phase progression: observer now → soft_gate at 40 closed trades → active_gate at 100+.
+edge_detector:
+  mode: observer
+  min_sample_for_gate: 40               # n below this: pseudo-edge downgraded to REDUCE_SIZE (never BLOCK)
+  global_baseline_winrate: 0.50         # fallback baseline when pair/regime samples < 5
+
+# ── Probabilistic EV Model ───────────────────────────────────────────────────
+ev_model:
+  taker_fee_pct: 0.04                   # Binance futures taker fee %
+  maker_fee_pct: 0.02                   # Binance futures maker fee %
+  slippage_pct: 0.10                    # Expected slippage per leg % (Binance futures realistic)
+  min_ev_pct: 0.05                      # Min net EV% to trade (after fees)
+  min_p_win: 0.42                       # Setup-specific p(win) floor; avoid choking valid paper candidates
+  min_confidence: 0.55                  # Min empirical confidence to gate trade
+  min_trades_for_ev: 20                 # Min closed trades for reliable EV
+  prior_win_rate: 0.55                  # Conservative Bayesian prior (sparse data)
+  prior_avg_win_pct: 2.5                # Prior avg win % of equity (realistic 2R target)
+  prior_avg_loss_pct: 1.0               # Prior avg loss % of equity
+  max_kelly_pct: 3.0                    # Kelly sizing hard cap (% of equity)
+
+# ── Fractional Kelly Position Sizing ────────────────────────────────────────
+kelly:
+  fraction: 0.25                        # Quarter-Kelly (conservative)
+  max_kelly_pct: 3.0                    # Hard cap: max 3% equity risk
+  min_kelly_pct: 0.5                    # Floor: always risk at least 0.5%
+  volatility_scale: true                # Reduce size in high-vol regimes
+  vol_target_atr_pct: 1.5              # Target ATR% for vol-neutral sizing
+
+# ── Derivatives Data Fetching ────────────────────────────────────────────────
+derivatives:
+  ls_ratio_period: "5m"                 # Binance L/S ratio candle period
+  ls_ratio_limit: 1                     # Fetch only latest
+  taker_volume_period: "5m"
+  taker_volume_limit: 1
+
+# ── Regime Classifier ────────────────────────────────────────────────────────
+regime:
+  adx_trending_threshold: 25            # ADX above this = trending
+  atr_extreme_vol_multiplier: 2.5       # ATR spike = high vol regime
+  sideways_atr_pct_max: 0.5            # ATR % below this = sideways
+
+# ── Execution Engine ─────────────────────────────────────────────────────────
+execution:
+  prefer_limit_orders: true             # Use limit entry orders
+  limit_order_offset_pct: 0.05          # Offset from mid-price for limit (%)
+  limit_order_timeout_s: 60             # Cancel unfilled limit after N seconds
+  min_spread_pct: 0.02                  # Skip pair if spread exceeds this %
+  entry_scale_levels: 2                 # Scale into position across 2 levels
+  entry_scale_pct:                      # Weight at each scaling level
+    - 0.60
+    - 0.40
+
+# Note: adx_period is defined under the `indicators` section above (line ~64).
+
+# ── Shadow Mode ──────────────────────────────────────────────────────────────
+shadow:
+  enabled: true                    # Runs ghost trades to accelerate ML training data
+  report_interval_trades: 10       # Print shadow report every N closed trades
