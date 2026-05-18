@@ -133,6 +133,7 @@ telegram:
   chat_id: ""       # Set via .env: TELEGRAM_CHAT_ID
   heartbeat_interval_minutes: 0    # Off; fund manager report is the primary Telegram cadence
   cycle_report_interval_minutes: 0 # Detailed fund-manager Telegram report cadence (0 = off)
+  equity_graph_interval_minutes: 60 # Separate PNG balance/equity graph cadence
 
 safety:
   pause_on_extreme_volatility: true

@@ -12,6 +12,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import TYPE_CHECKING
 
 import httpx
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 _BASE = "https://api.telegram.org/bot{token}/sendMessage"
+_PHOTO_BASE = "https://api.telegram.org/bot{token}/sendPhoto"
 _MAX_MESSAGE_LEN = 4000
 
 
@@ -34,6 +36,7 @@ class TelegramNotifier:
         self._chat_id: str = str(os.getenv("TELEGRAM_CHAT_ID") or tg.get("chat_id", "")).strip()
         self._enabled: bool = bool(self._token and self._chat_id)
         self._url = _BASE.format(token=self._token)
+        self._photo_url = _PHOTO_BASE.format(token=self._token)
 
         if self._enabled:
             log.info("Telegram notifier enabled → chat_id=%s", self._chat_id)
@@ -271,9 +274,11 @@ class TelegramNotifier:
         win_rate: float = 0.0,
         sharpe: float = 0.0,
         total_trades: int = 0,
+        trade_log: list | None = None,
+        equity_curve: list[float] | None = None,
+        starting_equity: float = 0.0,
         regime_thresholds: dict | None = None,
         jim_bonus: float = 0.0,
-        starting_equity: float = 0.0,
         bootstrap_audit: list[str] | None = None,
     ) -> None:
         if not self._enabled:
@@ -352,6 +357,18 @@ class TelegramNotifier:
         total_pnl_pct = (total_pnl_usd / starting_equity * 100) if starting_equity > 0 else 0.0
         total_sign = "+" if total_pnl_usd >= 0 else ""
         total_emoji = "📈" if total_pnl_usd >= 0 else "📉"
+        perf = self._trade_performance_metrics(
+            trade_log or [],
+            equity_curve or [],
+            starting_equity=starting_equity,
+            equity=effective_equity,
+        )
+        perf_lines = [
+            f"PF `{perf['profit_factor']:.2f}`  WR `{perf['win_rate']:.1%}`  Z-Score `{perf['z_score']:+.2f}`  GHPR `{perf['ghpr_pct']:+.2f}%/trade`",
+            f"CAGR `{perf['cagr_pct']:+.1f}%`  MAR `{perf['mar']:.2f}`  Sharpe `{perf['sharpe']:.2f}`  Sortino `{perf['sortino']:.2f}`",
+            f"Avg W `{perf['avg_win_pct']:+.2f}%`  Avg L `{perf['avg_loss_pct']:+.2f}%`  Avg W/L `{perf['avg_wl']:.2f}`  Exp `{perf['expectancy_pct']:+.2f}%`",
+            f"Recovery `{perf['recovery_factor']:.2f}`  MaxDD `{perf['max_dd_pct']:.1f}%`  Trades `{perf['trades']}`",
+        ]
 
         lines = [
             f"🧮 *JIM SIMONS — FUND MANAGER REPORT*  #{cycle_num}",
@@ -363,6 +380,7 @@ class TelegramNotifier:
             f"{total_emoji} Total PnL: *{total_sign}${total_pnl_usd:.2f} ({total_sign}{total_pnl_pct:.2f}%)*",
             f"{pnl_emoji} Daily P&L: *{daily_pnl_pct:+.2f}%*  {dd_emoji} Drawdown: *{drawdown_pct:.1f}%*",
             f"📊 Win Rate: {wr_str} ({total_trades} trades)  📐 Sharpe: {sharpe_str}",
+            *perf_lines,
             f"──────────────────────",
             bonus_line,
             f"{streak_line}",
@@ -829,6 +847,39 @@ class TelegramNotifier:
             f"_The model never sleeps, Boss. — Jim_ 🧮🥷"
         )
 
+    async def equity_graph_report(
+        self,
+        points: list[dict],
+        *,
+        cycle_num: int = 0,
+        interval_minutes: float = 60.0,
+        mode: str = "paper",
+    ) -> None:
+        if not self._enabled or len(points) < 2:
+            return
+
+        png = self._build_equity_graph_png(
+            points,
+            cycle_num=cycle_num,
+            interval_minutes=interval_minutes,
+            mode=mode,
+        )
+        latest = points[-1]
+        balance = self._safe_float(latest.get("balance", 0.0))
+        equity = self._safe_float(latest.get("equity", balance))
+        floating = equity - balance
+        peak = max(equity, max(self._safe_float(point.get("equity", balance)) for point in points))
+        drawdown_pct = ((peak - equity) / peak * 100) if peak > 0 else 0.0
+        now = datetime.now(UTC).strftime("%H:%M:%S UTC")
+        caption = (
+            f"JIM SIMONS — BALANCE / EQUITY GRAPH\n"
+            f"{now}\n"
+            f"Mode: {mode.upper()} | Samples: {len(points)} | Cadence: {interval_minutes:.0f}m\n"
+            f"Balance: ${balance:,.2f} | Equity: ${equity:,.2f} | Floating: {floating:+.2f} | DD: {drawdown_pct:.1f}%\n"
+            f"Independent PNG snapshot."
+        )
+        await self._send_photo(png, caption)
+
     async def send_raw(self, text: str) -> None:
         await self._send(text)
 
@@ -874,9 +925,325 @@ class TelegramNotifier:
         except Exception as exc:
             log.warning("Telegram error: %s", exc)
 
+    async def _send_photo(self, photo_bytes: bytes, caption: str) -> None:
+        if not self._enabled:
+            return
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    self._photo_url,
+                    data={
+                        "chat_id": self._chat_id,
+                        "caption": caption,
+                    },
+                    files={
+                        "photo": ("equity_graph.png", photo_bytes, "image/png"),
+                    },
+                )
+                if resp.status_code != 200:
+                    log.warning(
+                        "Telegram photo send failed: %s %s",
+                        resp.status_code,
+                        resp.text[:200],
+                    )
+        except Exception as exc:
+            log.warning("Telegram photo error: %s", exc)
+
     @staticmethod
     def _active_session_label() -> str:
         return active_market_session_label()
+
+    def _trade_performance_metrics(
+        self,
+        trade_log: list,
+        equity_curve: list[float],
+        *,
+        starting_equity: float,
+        equity: float,
+    ) -> dict[str, float]:
+        trades = list(trade_log or [])
+        n = len(trades)
+        if n == 0:
+            return {
+                "trades": 0.0,
+                "win_rate": 0.0,
+                "profit_factor": 0.0,
+                "z_score": 0.0,
+                "ghpr_pct": 0.0,
+                "cagr_pct": 0.0,
+                "mar": 0.0,
+                "sharpe": 0.0,
+                "sortino": 0.0,
+                "avg_win_pct": 0.0,
+                "avg_loss_pct": 0.0,
+                "avg_wl": 0.0,
+                "expectancy_pct": 0.0,
+                "recovery_factor": 0.0,
+                "max_dd_pct": 0.0,
+            }
+
+        pnl_usd = [self._safe_float(getattr(t, "pnl_usd", 0.0)) for t in trades]
+        pnl_pct = [self._safe_float(getattr(t, "pnl_pct", 0.0)) for t in trades]
+        wins = [p for p in pnl_usd if p > 0]
+        losses = [p for p in pnl_usd if p <= 0]
+        gross_profit = sum(wins)
+        gross_loss = abs(sum(losses))
+        win_rate = len(wins) / n if n else 0.0
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else (float("inf") if wins else 0.0)
+        avg_win_pct = (sum(p for p in pnl_pct if p > 0) / len(wins)) if wins else 0.0
+        avg_loss_pct = (abs(sum(p for p in pnl_pct if p <= 0)) / len(losses)) if losses else 0.0
+        avg_wl = (avg_win_pct / avg_loss_pct) if avg_loss_pct > 0 else (float("inf") if avg_win_pct > 0 else 0.0)
+        expectancy_pct = sum(pnl_pct) / n
+        max_dd_usd = self._max_drawdown_usd(equity_curve, starting_equity, equity)
+        recovery_factor = (sum(pnl_usd) / max_dd_usd) if max_dd_usd > 0 else 0.0
+        max_dd_pct = self._max_drawdown_pct(equity_curve, starting_equity, equity)
+        ghpr_pct = self._ghpr_pct(pnl_pct)
+        z_score = self._runs_z_score(trades)
+        cagr_pct = self._cagr_pct(trades, starting_equity, equity)
+        sharpe = self._sharpe_ratio_from_curve(equity_curve)
+        sortino = self._sortino_ratio_from_curve(equity_curve)
+        mar = (cagr_pct / max_dd_pct) if max_dd_pct > 0 else 0.0
+        return {
+            "trades": float(n),
+            "win_rate": win_rate,
+            "profit_factor": profit_factor,
+            "z_score": z_score,
+            "ghpr_pct": ghpr_pct,
+            "cagr_pct": cagr_pct,
+            "mar": mar,
+            "sharpe": sharpe,
+            "sortino": sortino,
+            "avg_win_pct": avg_win_pct,
+            "avg_loss_pct": avg_loss_pct,
+            "avg_wl": avg_wl,
+            "expectancy_pct": expectancy_pct,
+            "recovery_factor": recovery_factor,
+            "max_dd_pct": max_dd_pct,
+        }
+
+    def _runs_z_score(self, trades: list) -> float:
+        outcomes = [self._safe_float(getattr(t, "pnl_usd", 0.0)) > 0 for t in trades]
+        n1 = sum(1 for outcome in outcomes if outcome)
+        n2 = len(outcomes) - n1
+        if n1 == 0 or n2 == 0 or len(outcomes) < 2:
+            return 0.0
+        runs = 1
+        for idx in range(1, len(outcomes)):
+            if outcomes[idx] != outcomes[idx - 1]:
+                runs += 1
+        expected = 1 + (2 * n1 * n2) / (n1 + n2)
+        variance = (
+            2 * n1 * n2 * (2 * n1 * n2 - n1 - n2)
+        ) / (((n1 + n2) ** 2) * (n1 + n2 - 1))
+        if variance <= 0:
+            return 0.0
+        return (runs - expected) / (variance ** 0.5)
+
+    @staticmethod
+    def _ghpr_pct(pnl_pct: list[float]) -> float:
+        if not pnl_pct:
+            return 0.0
+        growth = 1.0
+        for pnl in pnl_pct:
+            growth *= max(0.0, 1.0 + pnl / 100.0)
+        return (growth ** (1 / len(pnl_pct)) - 1.0) * 100.0 if growth > 0 else -100.0
+
+    @staticmethod
+    def _cagr_pct(trades: list, starting_equity: float, equity: float) -> float:
+        if starting_equity <= 0 or equity <= 0 or not trades:
+            return 0.0
+        timestamps = [
+            float(getattr(t, "closed_at", 0.0) or getattr(t, "opened_at", 0.0) or 0.0)
+            for t in trades
+        ]
+        timestamps = [ts for ts in timestamps if ts > 0]
+        if not timestamps:
+            return 0.0
+        elapsed_seconds = max(timestamps) - min(timestamps)
+        if elapsed_seconds <= 0:
+            return 0.0
+        years = elapsed_seconds / 31557600.0
+        if years <= 0:
+            return 0.0
+        try:
+            return ((equity / starting_equity) ** (1 / years) - 1.0) * 100.0
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _max_drawdown_usd(equity_curve: list[float], starting_equity: float, equity: float) -> float:
+        curve = [float(v) for v in equity_curve if v is not None]
+        if not curve:
+            peak = max(starting_equity, equity)
+            return max(0.0, peak - equity)
+        peak = float(starting_equity if starting_equity > 0 else curve[0])
+        max_dd = 0.0
+        for value in curve:
+            if value > peak:
+                peak = value
+            max_dd = max(max_dd, peak - value)
+        return max_dd
+
+    @staticmethod
+    def _max_drawdown_pct(equity_curve: list[float], starting_equity: float, equity: float) -> float:
+        curve = [float(v) for v in equity_curve if v is not None]
+        if not curve:
+            peak = max(starting_equity, equity)
+            return ((peak - equity) / peak * 100.0) if peak > 0 else 0.0
+        peak = float(starting_equity if starting_equity > 0 else curve[0])
+        max_dd = 0.0
+        for value in curve:
+            if value > peak:
+                peak = value
+            if peak > 0:
+                max_dd = max(max_dd, (peak - value) / peak * 100.0)
+        return max_dd
+
+    @staticmethod
+    def _curve_returns(equity_curve: list[float]) -> list[float]:
+        curve = [float(v) for v in equity_curve if v is not None]
+        return [
+            (curve[i] - curve[i - 1]) / curve[i - 1]
+            for i in range(1, len(curve))
+            if curve[i - 1] != 0
+        ]
+
+    def _sharpe_ratio_from_curve(self, equity_curve: list[float]) -> float:
+        returns = self._curve_returns(equity_curve)
+        if len(returns) < 3:
+            return 0.0
+        mean_r = sum(returns) / len(returns)
+        std_r = (sum((r - mean_r) ** 2 for r in returns) / len(returns)) ** 0.5
+        if std_r == 0:
+            return 0.0
+        return (mean_r / std_r) * (4 * 365) ** 0.5
+
+    def _sortino_ratio_from_curve(self, equity_curve: list[float]) -> float:
+        returns = self._curve_returns(equity_curve)
+        if len(returns) < 3:
+            return 0.0
+        mean_r = sum(returns) / len(returns)
+        downside = [r for r in returns if r < 0]
+        if not downside:
+            return 9.99
+        down_std = (sum(r ** 2 for r in downside) / len(downside)) ** 0.5
+        if down_std == 0:
+            return 0.0
+        return (mean_r / down_std) * (4 * 365) ** 0.5
+
+    def _build_equity_graph_png(
+        self,
+        points: list[dict],
+        *,
+        cycle_num: int,
+        interval_minutes: float,
+        mode: str,
+    ) -> bytes:
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.dates as mdates
+        import matplotlib.pyplot as plt
+
+        ordered = sorted(points, key=lambda p: self._safe_float(p.get("ts", 0.0)))
+        timestamps = [
+            datetime.fromtimestamp(self._safe_float(point.get("ts", 0.0)), tz=UTC)
+            for point in ordered
+        ]
+        balances = [self._safe_float(point.get("balance", 0.0)) for point in ordered]
+        equities = [
+            self._safe_float(point.get("equity", balance))
+            for point, balance in zip(ordered, balances)
+        ]
+        peaks: list[float] = []
+        running_peak = 0.0
+        for equity in equities:
+            running_peak = max(running_peak, equity)
+            peaks.append(running_peak)
+        drawdowns = [
+            ((peak - equity) / peak * 100) if peak > 0 else 0.0
+            for peak, equity in zip(peaks, equities)
+        ]
+
+        plt.style.use("dark_background")
+        fig, (ax, ax_dd) = plt.subplots(
+            2,
+            1,
+            figsize=(10, 6.2),
+            dpi=160,
+            sharex=True,
+            gridspec_kw={"height_ratios": [3, 1]},
+        )
+        fig.patch.set_facecolor("#0f172a")
+        ax.set_facecolor("#0f172a")
+        ax_dd.set_facecolor("#0f172a")
+
+        ax.plot(timestamps, balances, color="#38bdf8", linewidth=2.2, label="Balance")
+        ax.plot(timestamps, equities, color="#a78bfa", linewidth=2.2, label="Equity")
+        ax.fill_between(timestamps, balances, equities, color="#a78bfa", alpha=0.14)
+        ax.scatter([timestamps[-1]], [balances[-1]], color="#38bdf8", s=24, zorder=5)
+        ax.scatter([timestamps[-1]], [equities[-1]], color="#a78bfa", s=24, zorder=5)
+
+        latest_balance = balances[-1]
+        latest_equity = equities[-1]
+        floating = latest_equity - latest_balance
+        latest_drawdown = drawdowns[-1] if drawdowns else 0.0
+        ax.set_title("Balance vs Equity", fontsize=15, pad=12, weight="bold")
+        ax.text(
+            0.01,
+            0.98,
+            f"Mode: {mode.upper()}  |  Cycle: #{cycle_num}  |  Cadence: {interval_minutes:.0f}m",
+            transform=ax.transAxes,
+            va="top",
+            fontsize=9,
+            color="#cbd5e1",
+        )
+        ax.text(
+            0.01,
+            0.91,
+            f"Latest Balance ${latest_balance:,.2f}  |  Equity ${latest_equity:,.2f}  |  Floating {floating:+.2f}",
+            transform=ax.transAxes,
+            va="top",
+            fontsize=9,
+            color="#cbd5e1",
+        )
+        ax_dd.axhline(0.0, color="#475569", linewidth=1.0)
+        ax_dd.fill_between(timestamps, drawdowns, color="#fb7185", alpha=0.28)
+        ax_dd.plot(timestamps, drawdowns, color="#fb7185", linewidth=1.8, label="Drawdown %")
+        ax_dd.scatter([timestamps[-1]], [latest_drawdown], color="#fb7185", s=24, zorder=5)
+        ax_dd.set_ylabel("DD %", fontsize=9, color="#cbd5e1")
+        ax_dd.text(
+            0.01,
+            0.82,
+            f"Latest DD {latest_drawdown:.1f}%",
+            transform=ax_dd.transAxes,
+            va="top",
+            fontsize=9,
+            color="#cbd5e1",
+        )
+
+        locator = mdates.AutoDateLocator(minticks=3, maxticks=6)
+        ax.xaxis.set_major_locator(locator)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax_dd.xaxis.set_major_locator(locator)
+        ax_dd.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+        ax.grid(True, alpha=0.18)
+        ax_dd.grid(True, alpha=0.18)
+        ax.legend(loc="upper left", frameon=False)
+        ax_dd.legend(loc="upper left", frameon=False)
+        ax.tick_params(colors="#e2e8f0")
+        ax_dd.tick_params(colors="#e2e8f0")
+        for spine in ax.spines.values():
+            spine.set_color("#334155")
+        for spine in ax_dd.spines.values():
+            spine.set_color("#334155")
+
+        buf = BytesIO()
+        fig.tight_layout()
+        fig.savefig(buf, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
+        plt.close(fig)
+        buf.seek(0)
+        return buf.getvalue()
 
     def _split_message(self, text: str) -> list[str]:
         if len(text) <= _MAX_MESSAGE_LEN:

@@ -74,6 +74,8 @@ def test_maybe_send_performance_report_runs_on_interval():
     assert sent["equity"] == 80.99
     assert sent["open_positions"] == [{"symbol": "ETH/USDT:USDT"}]
     assert sent["closed_positions"][0].symbol == "BTC/USDT:USDT"
+    assert sent["trade_log"] == bot._learner._trade_log
+    assert sent["equity_curve"] == bot._equity_curve
     assert sent["starting_equity"] == 80.0
     assert "bootstrap_audit" not in sent
 
@@ -102,6 +104,32 @@ def test_maybe_send_bootstrap_audit_report_runs_on_separate_12h_cadence():
     assert sent["kwargs"]["cycle_num"] == 77
     assert sent["kwargs"]["interval_hours"] == 12.0
     assert sent["args"][0] == ["Bootstrap Audit", "Phase: `BOOTSTRAP` | N `1`"]
+
+
+def test_maybe_send_equity_graph_report_runs_on_interval():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    sent = {}
+
+    class _Telegram:
+        async def equity_graph_report(self, points, **kwargs):
+            sent["points"] = points
+            sent["kwargs"] = kwargs
+
+    bot._cfg = {"telegram": {"equity_graph_interval_minutes": 60}}
+    bot._tg_equity_graph_ts = time.time() - (60 * 60) - 1
+    bot._equity_graph_points = [
+        {"ts": 1716000000.0, "balance": 80.0, "equity": 80.0},
+        {"ts": 1716003600.0, "balance": 81.0, "equity": 82.5},
+    ]
+    bot._trading = {"mode": "paper"}
+    bot._telegram = _Telegram()
+
+    asyncio.run(bot._maybe_send_equity_graph_report(cycle_num=19))
+
+    assert sent["kwargs"]["cycle_num"] == 19
+    assert sent["kwargs"]["interval_minutes"] == 60.0
+    assert sent["kwargs"]["mode"] == "paper"
+    assert sent["points"] == bot._equity_graph_points
 
 
 def test_run_bootstrap_audit_now_sends_once_and_exits(monkeypatch):

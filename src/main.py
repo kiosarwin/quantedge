@@ -178,10 +178,12 @@ class NinjaTrader:
         self._lifecycle = StrategyLifecycleManager(cfg)
         self._paper_validation = cfg.get("paper_validation", {})
         self._equity_curve: list[float] = []
+        self._equity_graph_points: list[dict[str, float]] = []
         self._running = False
         self._heartbeat_ts = 0.0
         self._tg_heartbeat_ts = 0.0
         self._tg_cycle_report_ts = 0.0
+        self._tg_equity_graph_ts = 0.0
         self._startup_cycle_report_pending = True
         self._last_fm_report_ts = 0.0       # for fund manager report interval
         self._last_bootstrap_audit_ts = time.time()  # separate bootstrap audit cadence
@@ -475,6 +477,7 @@ class NinjaTrader:
                     )
                     self._starting_equity = float(persisted.get("starting_equity", self._starting_equity))
                     self._equity_curve = list(persisted.get("equity_curve", []))
+                    self._equity_graph_points = list(persisted.get("equity_graph_points", []))
                     self._consecutive_wins = int(persisted.get("consecutive_wins", 0))
                     persisted_kill = str(persisted.get("kill_switch_reason", "") or "")
                     transient_kills = {"runtime_error_burst", "balance_fetch_failure"}
@@ -493,6 +496,16 @@ class NinjaTrader:
                     )
         except Exception as exc:
             log.warning("State restore failed: %s — using seeded defaults", exc)
+
+        if not self._equity_graph_points:
+            now_ts = time.time()
+            self._equity_graph_points = [
+                {
+                    "ts": now_ts,
+                    "balance": float(self._risk.state.equity),
+                    "equity": float(self._risk.state.equity),
+                }
+            ]
 
         self._running = True
         log.info("Ninja Trader started in [bold]%s[/bold] mode", self._trading["mode"])
@@ -581,6 +594,15 @@ class NinjaTrader:
                 _price_map = {sym: snap.last_price for sym, snap in snapshots.items()}
                 _floating = self._trade_mgr.get_floating_pnl(_price_map)
                 _open_positions = self._telegram_open_positions()
+                _effective_equity, _effective_daily_pnl_pct, _effective_drawdown_pct = (
+                    self._effective_account_metrics(_floating)
+                )
+                self._equity_graph_points.append({
+                    "ts": time.time(),
+                    "balance": float(self._risk.state.equity),
+                    "equity": float(_effective_equity),
+                })
+                self._equity_graph_points = self._equity_graph_points[-720:]
                 await self._maybe_send_fund_manager_report(
                     breakdowns=breakdowns,
                     readiness_report=readiness_report,
@@ -597,15 +619,13 @@ class NinjaTrader:
                     lifecycle_report=lifecycle_report,
                     cycle_num=_cycle,
                 )
+                await self._maybe_send_equity_graph_report(cycle_num=_cycle)
 
                 # Send Telegram hourly heartbeat after first scoring
                 if _send_tg_heartbeat:
                     top_names = [
                         f"{b.symbol} {b.direction} {b.total_score:.0f}" for b in breakdowns[:5]
                     ]
-                    _effective_equity, _effective_daily_pnl_pct, _effective_drawdown_pct = (
-                        self._effective_account_metrics(_floating)
-                    )
                     await self._telegram.heartbeat(
                         equity=_effective_equity,
                         drawdown_pct=_effective_drawdown_pct,
@@ -1550,9 +1570,30 @@ class NinjaTrader:
             win_rate=win_rate,
             sharpe=sharpe,
             total_trades=total_trades,
+            trade_log=trade_log,
+            equity_curve=self._equity_curve,
+            starting_equity=self._starting_equity,
             regime_thresholds=self._trading.get("regime_thresholds", {}),
             jim_bonus=self._fund_mgr.bonus,
-            starting_equity=self._starting_equity,
+        )
+
+    async def _maybe_send_equity_graph_report(self, cycle_num: int = 0) -> None:
+        graph_minutes = float(
+            self._cfg.get("telegram", {}).get("equity_graph_interval_minutes", 60) or 0
+        )
+        if graph_minutes <= 0 or len(self._equity_graph_points) < 2:
+            return
+
+        report_interval = graph_minutes * 60
+        if time.time() - self._tg_equity_graph_ts < report_interval:
+            return
+
+        self._tg_equity_graph_ts = time.time()
+        await self._telegram.equity_graph_report(
+            self._equity_graph_points,
+            cycle_num=cycle_num,
+            interval_minutes=graph_minutes,
+            mode=self._trading["mode"],
         )
 
     async def _maybe_send_bootstrap_audit_report(
@@ -1763,6 +1804,7 @@ class NinjaTrader:
                 "paused_until_ts": self._risk.state.paused_until_ts,
                 "starting_equity": self._starting_equity,
                 "equity_curve": self._equity_curve[-500:],
+                "equity_graph_points": self._equity_graph_points[-720:],
                 "open_trades": open_trades,
                 "top_signals": signals,
                 "shadow": shadow,

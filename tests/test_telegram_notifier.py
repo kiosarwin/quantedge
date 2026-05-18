@@ -1,6 +1,7 @@
 import asyncio
 import os
 from datetime import datetime
+from types import SimpleNamespace
 
 from src.notifications.telegram import TelegramNotifier
 
@@ -22,8 +23,8 @@ class _FakeAsyncClient:
     async def __aexit__(self, exc_type, exc, tb):
         return False
 
-    async def post(self, url, json):
-        self._calls.append((url, json))
+    async def post(self, url, json=None, data=None, files=None):
+        self._calls.append((url, json, data, files))
         return self._responses.pop(0)
 
 
@@ -258,6 +259,58 @@ def test_cycle_report_includes_active_session_in_header(monkeypatch):
     assert sent["message"].index("🏦 Balance: *$80.00 USDT*") < sent["message"].index("💰 Equity: *$80.00 USDT*")
 
 
+def test_cycle_report_includes_extra_performance_metrics(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+    monkeypatch.setattr(
+        "src.notifications.telegram.active_market_session_label",
+        lambda: "London",
+    )
+
+    trade_log = [
+        SimpleNamespace(pnl_usd=10.0, pnl_pct=10.0, opened_at=1716000000.0, closed_at=1716086400.0),
+        SimpleNamespace(pnl_usd=-5.0, pnl_pct=-5.0, opened_at=1716086400.0, closed_at=1716172800.0),
+        SimpleNamespace(pnl_usd=8.0, pnl_pct=8.0, opened_at=1716172800.0, closed_at=1716259200.0),
+        SimpleNamespace(pnl_usd=-4.0, pnl_pct=-4.0, opened_at=1716259200.0, closed_at=1716345600.0),
+    ]
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity=109.0,
+            drawdown_pct=2.5,
+            daily_pnl_pct=0.0,
+            open_trades=0,
+            cycle_num=12,
+            total_trades=4,
+            starting_equity=100.0,
+            trade_log=trade_log,
+            equity_curve=[100.0, 110.0, 105.0, 109.0],
+        )
+    )
+
+    assert "PF `" in sent["message"]
+    assert "WR `" in sent["message"]
+    assert "Z-Score `" in sent["message"]
+    assert "GHPR `" in sent["message"]
+    assert "CAGR `" in sent["message"]
+    assert "MAR `" in sent["message"]
+    assert "Sharpe `" in sent["message"]
+    assert "Sortino `" in sent["message"]
+    assert "Avg W `" in sent["message"]
+    assert "Avg L `" in sent["message"]
+    assert "Avg W/L `" in sent["message"]
+    assert "Recovery `" in sent["message"]
+
+
 def test_cycle_report_shows_no_symbols_scored(monkeypatch):
     monkeypatch.setenv("TELEGRAM_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
@@ -284,6 +337,40 @@ def test_cycle_report_shows_no_symbols_scored(monkeypatch):
     )
 
     assert "No symbols scored this cycle" in sent["message"]
+
+
+def test_equity_graph_report_sends_png_photo(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    calls = []
+    responses = [_FakeResponse(200, '{"ok":true}')]
+
+    monkeypatch.setattr(
+        "src.notifications.telegram.httpx.AsyncClient",
+        lambda timeout: _FakeAsyncClient(responses, calls),
+    )
+
+    asyncio.run(
+        notifier.equity_graph_report(
+            [
+                {"ts": 1716000000.0, "balance": 80.0, "equity": 80.0},
+                {"ts": 1716003600.0, "balance": 81.0, "equity": 82.5},
+            ],
+            cycle_num=12,
+            interval_minutes=60,
+            mode="paper",
+        )
+    )
+
+    assert calls[0][0] == notifier._photo_url
+    assert calls[0][2]["caption"].startswith("JIM SIMONS — BALANCE / EQUITY GRAPH")
+    assert "DD:" in calls[0][2]["caption"]
+    photo_name, photo_bytes, mime_type = calls[0][3]["photo"]
+    assert photo_name == "equity_graph.png"
+    assert mime_type == "image/png"
+    assert photo_bytes.startswith(b"\x89PNG")
 
 
 def test_bootstrap_audit_report_uses_separate_header(monkeypatch):
