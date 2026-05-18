@@ -1904,6 +1904,24 @@ async def _run(args: argparse.Namespace) -> None:
     cfg = normalize_config(cfg)
 
     setup_logging(cfg)
+    if getattr(args, "bootstrap_audit_now", False):
+        bot = NinjaTrader(cfg)
+        try:
+            lifecycle_report = bot._lifecycle.build_report(bot._learner._trade_log)
+            lines = bot._bootstrap_audit_lines(lifecycle_report)
+            await bot._telegram.bootstrap_audit_report(
+                lines,
+                interval_hours=float(
+                    cfg.get("telegram", {}).get("bootstrap_audit_interval_hours", 12) or 12
+                ),
+            )
+        finally:
+            try:
+                await bot._client.close()
+            except Exception:
+                pass
+        return
+
     bot = NinjaTrader(cfg)
     try:
         await bot.start()
@@ -1924,6 +1942,11 @@ def main() -> None:
     )
     parser.add_argument("--mode", choices=["paper", "live", "backtest"], default=None)
     parser.add_argument("--testnet", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument(
+        "--bootstrap-audit-now",
+        action="store_true",
+        help="Send one bootstrap audit report to Telegram and exit",
+    )
     args = parser.parse_args()
 
     try:

@@ -2,6 +2,7 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+import src.main as main_module
 from src.main import NinjaTrader
 
 
@@ -101,6 +102,55 @@ def test_maybe_send_bootstrap_audit_report_runs_on_separate_12h_cadence():
     assert sent["kwargs"]["cycle_num"] == 77
     assert sent["kwargs"]["interval_hours"] == 12.0
     assert sent["args"][0] == ["Bootstrap Audit", "Phase: `BOOTSTRAP` | N `1`"]
+
+
+def test_run_bootstrap_audit_now_sends_once_and_exits(monkeypatch):
+    sent = {}
+
+    class _Client:
+        async def close(self):
+            sent["closed"] = True
+
+    class _Telegram:
+        async def bootstrap_audit_report(self, lines, interval_hours):
+            sent["lines"] = lines
+            sent["interval_hours"] = interval_hours
+
+    class _Lifecycle:
+        @staticmethod
+        def build_report(trade_log):
+            return {"counts": {}, "recommendation": "PAPER_ONLY"}
+
+    class _Bot:
+        def __init__(self, cfg):
+            self._cfg = cfg
+            self._client = _Client()
+            self._telegram = _Telegram()
+            self._lifecycle = _Lifecycle()
+            self._learner = SimpleNamespace(_trade_log=[])
+
+        def _bootstrap_audit_lines(self, lifecycle_report=None):
+            return ["Bootstrap Audit", "Phase: `BOOTSTRAP` | N `0`"]
+
+    monkeypatch.setattr(main_module, "NinjaTrader", _Bot)
+    monkeypatch.setattr(main_module, "setup_logging", lambda cfg: None)
+    monkeypatch.setattr(main_module, "load_config", lambda path: {"telegram": {"bootstrap_audit_interval_hours": 12}, "trading": {"mode": "paper"}, "exchange": {}})
+    monkeypatch.setattr(main_module, "normalize_config", lambda cfg: cfg)
+
+    asyncio.run(
+        main_module._run(
+            SimpleNamespace(
+                config="config/config.yaml",
+                mode=None,
+                testnet=None,
+                bootstrap_audit_now=True,
+            )
+        )
+    )
+
+    assert sent["interval_hours"] == 12.0
+    assert sent["lines"] == ["Bootstrap Audit", "Phase: `BOOTSTRAP` | N `0`"]
+    assert sent["closed"] is True
 
 
 def test_maybe_send_performance_report_sends_immediately_after_start():
