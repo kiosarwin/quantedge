@@ -5,7 +5,7 @@ Last updated: 2026-05-18
 ## Current State
 
 - Repo `/home/arwin/ninja_trader` is a git repo on branch `work`.
-- Clean commit `c20fed4` is pushed to `origin/master` on `git@github.com:kiosarwin/ninja-trader.git`.
+- Clean commit `7cea795` is pushed to `origin/master` on `git@github.com:kiosarwin/ninja-trader.git`.
 - Production VM `35.231.37.107` is synced to that commit and bot is running in `tmux` session `ninja-vm`.
 - Telegram heartbeat is active and formatted short; `cycle_report` spam is gated off by default.
 - Live secrets were sanitized out of tracked markdown/config files; runtime `.env` stays on the VM.
