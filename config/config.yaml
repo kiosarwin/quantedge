@@ -193,8 +193,8 @@ scoring:
   adjustment_rate: 0.02
 
 strategy:
-  trend_min_score: 65
-  trend_min_structure: 58
+  trend_min_score: 62
+  trend_min_structure: 55
   trend_long_only: true
   enable_compression_breakout: false
   compression_min_structure: 60
