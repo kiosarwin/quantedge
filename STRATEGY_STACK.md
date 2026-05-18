@@ -13,6 +13,8 @@ Bot ini memperlakukan trading crypto perpetual directional sebagai stack yang sa
 3. `reversal`
 4. fallback `neutral`
 
+`neutral` bukan sleeve alpha utama. Itu fallback ketika tidak ada sleeve yang tervalidasi dengan cukup kuat untuk dipromosikan. Trade masih bisa lolos, tetapi biasanya dengan score/sizing yang lebih konservatif dan alasan seperti `no validated sleeve` atau `short side restricted...`.
+
 Basis riset yang dipakai:
 
 - Momentum time-series / trend following merupakan salah satu edge directional paling konsisten pada instrumen futures yang likuid.
@@ -106,6 +108,7 @@ Evaluasi ke depan harus melaporkan:
 Sudah diimplementasikan:
 
 - `strategy_router` merutekan ke `trend_following`, `compression_breakout`, `reversal`, dan `neutral`
+- `neutral` dipakai sebagai fallback routing, bukan sebagai sleeve alpha mandiri
 - overlay score dan sizing yang aware terhadap dispersion telah diterapkan di scorer
 - attribution untuk sleeve, exit profile, regime, dan side telah direkam di reporting
 - profile exit per sleeve telah dipakai di live dan backtest untuk sizing TP, trailing, dan parameter hold time

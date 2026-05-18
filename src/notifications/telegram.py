@@ -733,6 +733,7 @@ class TelegramNotifier:
         mode_label = "🟢 LIVE" if mode == "live" else "📋 PAPER"
         kelly_label = "🔼 Scaling Up" if kelly_f > 1.05 else "🔽 Scaling Down" if kelly_f < 0.95 else "⚖️ Neutral"
         floating_total = sum(self._safe_float(p.get("pnl_usd", 0.0)) for p in floating_positions or [])
+        balance = self._safe_float(equity)
         effective_equity = self._safe_float(equity) + floating_total
 
         regime_lines = ""
@@ -745,6 +746,7 @@ class TelegramNotifier:
             f"🧮 *JIM SIMONS — FUND MANAGER REPORT*\n"
             f"`Mode: {mode_label}`\n"
             f"═══════════════════════\n"
+            f"🏦 Balance: *${balance:,.2f} USDT*\n"
             f"💰 *Equity:* `${effective_equity:,.2f}`\n"
             f"📋 *Trades:* `{n}`  |  Drawdown: `{dd:.1f}%`\n"
             f"─────────────────────\n"

@@ -255,6 +255,7 @@ def test_cycle_report_includes_active_session_in_header(monkeypatch):
     assert "JIM SIMONS — FUND MANAGER REPORT" in sent["message"]
     assert "Session: *London*" in sent["message"]
     assert "🏦 Balance: *$80.00 USDT*" in sent["message"]
+    assert sent["message"].index("🏦 Balance: *$80.00 USDT*") < sent["message"].index("💰 Equity: *$80.00 USDT*")
 
 
 def test_cycle_report_shows_no_symbols_scored(monkeypatch):
