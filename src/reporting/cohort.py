@@ -67,14 +67,8 @@ def _session_from_trade(trade) -> str:
     explicit = getattr(trade, "session", "") or _safe_text(getattr(trade, "scores", {}) or {}, "session", "")
     if explicit:
         return explicit
-    hour = int((getattr(trade, "opened_at", 0.0) // 3600) % 24)
-    if hour < 8:
-        return "asia"
-    if hour < 13:
-        return "london"
-    if hour < 17:
-        return "overlap_london_ny"
-    return "ny"
+    opened_at = float(getattr(trade, "opened_at", 0.0) or 0.0)
+    return active_market_session_key(datetime.fromtimestamp(opened_at, tz=WITA))
 
 
 def _bucket_volatility(trade) -> str:
@@ -268,3 +262,6 @@ def summarize_cohorts(trade_log: list, key_fn=default_cohort_key, min_trades: in
 
     rows.sort(key=lambda r: (r["expectancy_usd"], r["profit_factor"], r["trades"]), reverse=True)
     return rows
+from datetime import datetime
+
+from src.session_clock import WITA, active_market_session_key

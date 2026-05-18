@@ -217,8 +217,8 @@ logging:
 telegram:
   token: ""         # Set via .env: TELEGRAM_TOKEN
   chat_id: ""       # Set via .env: TELEGRAM_CHAT_ID
-  heartbeat_interval_minutes: 0   # Off; fund manager report is the primary Telegram cadence
-  cycle_report_interval_minutes: 0 # Detailed fund-manager Telegram report cadence (0 = off)
+  heartbeat_interval_minutes: 1   # Short account-summary heartbeat every minute
+  cycle_report_interval_minutes: 5 # Detailed Jim Simons fund-manager report every 5 minutes
   pnl_update_interval_minutes: 1  # Floating P&L update interval (0 = off)
 
 safety:
@@ -230,7 +230,7 @@ safety:
   heartbeat_interval_seconds: 30
   auto_live_on_readiness: false          # Manual promotion only after audited forward results
   min_live_balance_usd: 10.0             # Abort live transition if balance below this
-  performance_report_interval_minutes: 5  # Send fund manager report every N minutes
+  performance_report_interval_minutes: 5  # Backstop cadence if cycle report interval is unset
   close_positions_on_shutdown: false     # Preserve positions on service restart/shutdown; use manual panic close for emergencies
   heartbeat_fail_kill_switch_count: 6    # Repeated balance/API failure -> freeze new entries
   runtime_error_kill_switch_count: 5     # Repeated main-loop exceptions -> freeze new entries

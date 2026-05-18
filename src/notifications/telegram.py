@@ -14,6 +14,7 @@ import time
 from typing import TYPE_CHECKING
 
 import httpx
+from src.session_clock import active_market_session_label
 
 if TYPE_CHECKING:
     from src.risk.risk_manager import TradeSetup
@@ -255,7 +256,8 @@ class TelegramNotifier:
         if not self._enabled:
             return
         import datetime
-        now = datetime.datetime.utcnow().strftime("%H:%M:%S UTC")
+        now = datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S UTC")
+        active_session = self._active_session_label()
 
         pnl_emoji = "📈" if daily_pnl_pct >= 0 else "📉"
         dd_emoji  = "🔴" if drawdown_pct > 8 else "🟡" if drawdown_pct > 3 else "🟢"
@@ -330,6 +332,7 @@ class TelegramNotifier:
         lines = [
             f"🧮 *JIM SIMONS — FUND MANAGER REPORT*  #{cycle_num}",
             f"`{now}`",
+            f"🌍 Session: *{active_session}*",
             f"══════════════════════",
             f"💰 Equity: *${effective_equity:,.2f} USDT*",
             f"{total_emoji} Total PnL: *{total_sign}${total_pnl_usd:.2f} ({total_sign}{total_pnl_pct:.2f}%)*",
@@ -624,7 +627,8 @@ class TelegramNotifier:
             regime_lines += f"\n   {short}: {s['win_rate']:.0%} WR  ({s['total']} trades)  ${s['pnl']:+.2f}"
 
         msg = (
-            f"📊 *JIM SIMONS — {mode_label}*\n"
+            f"🧮 *JIM SIMONS — FUND MANAGER REPORT*\n"
+            f"`Mode: {mode_label}`\n"
             f"═══════════════════════\n"
             f"💰 *Equity:* `${equity:,.2f}`\n"
             f"📋 *Trades:* `{n}`  |  Drawdown: `{dd:.1f}%`\n"
@@ -744,6 +748,10 @@ class TelegramNotifier:
                         )
         except Exception as exc:
             log.warning("Telegram error: %s", exc)
+
+    @staticmethod
+    def _active_session_label() -> str:
+        return active_market_session_label()
 
     def _split_message(self, text: str) -> list[str]:
         if len(text) <= _MAX_MESSAGE_LEN:

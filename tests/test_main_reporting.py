@@ -1,0 +1,132 @@
+import asyncio
+import time
+from types import SimpleNamespace
+
+from src.main import NinjaTrader
+
+
+def test_maybe_send_performance_report_runs_on_interval():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    sent = {}
+
+    class _Telegram:
+        async def cycle_report(self, **kwargs):
+            sent.update(kwargs)
+
+    class _ML:
+        is_ready = False
+        cv_accuracy = 0.0
+
+        @staticmethod
+        def kelly_adjustment(trade_log):
+            return 1.0
+
+    bot._cfg = {"telegram": {"cycle_report_interval_minutes": 0}}
+    bot._safety = {"performance_report_interval_minutes": 5}
+    bot._tg_cycle_report_ts = time.time() - 301
+    bot._startup_cycle_report_pending = False
+    bot._learner = SimpleNamespace(
+        _trade_log=[
+            SimpleNamespace(
+                symbol="BTC/USDT:USDT",
+                direction="long",
+                pnl_usd=1.25,
+                pnl_pct=1.5,
+                reason="tp1",
+            )
+        ]
+    )
+    bot._fund_mgr = SimpleNamespace(bonus=0.0, _recent_performance_mult=lambda trade_log: 1.0)
+    bot._ml = _ML()
+    bot._risk = SimpleNamespace(
+        state=SimpleNamespace(
+            equity=80.99,
+            peak_equity=81.5,
+            drawdown_pct=0.0,
+            daily_pnl_pct=1.2,
+            open_trade_count=3,
+            consecutive_losses=0,
+        )
+    )
+    bot._equity_curve = [80.0, 80.99]
+    bot._trading = {"mode": "paper", "regime_thresholds": {"default": 45}}
+    bot._starting_equity = 80.0
+    bot._consecutive_wins = 1
+    bot._telegram = _Telegram()
+
+    asyncio.run(
+        bot._maybe_send_fund_manager_report(
+            breakdowns=[],
+            readiness_report=SimpleNamespace(passed=False),
+            jim_status={"ready": False, "trained_on": 0},
+            floating_positions=[{"pnl_usd": 1.62}],
+            open_positions=[{"symbol": "ETH/USDT:USDT"}],
+            total_trades=1,
+            win_rate=1.0,
+            sharpe=0.0,
+            cycle_num=11,
+        )
+    )
+
+    assert sent["cycle_num"] == 11
+    assert sent["equity"] == 80.99
+    assert sent["open_positions"] == [{"symbol": "ETH/USDT:USDT"}]
+    assert sent["closed_positions"][0].symbol == "BTC/USDT:USDT"
+    assert sent["starting_equity"] == 80.0
+
+
+def test_maybe_send_performance_report_sends_immediately_after_start():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    sent = {}
+
+    class _Telegram:
+        async def cycle_report(self, **kwargs):
+            sent.update(kwargs)
+
+    class _ML:
+        is_ready = False
+        cv_accuracy = 0.0
+
+        @staticmethod
+        def kelly_adjustment(trade_log):
+            return 1.0
+
+    bot._cfg = {"telegram": {"cycle_report_interval_minutes": 5}}
+    bot._safety = {"performance_report_interval_minutes": 5}
+    bot._tg_cycle_report_ts = time.time()
+    bot._startup_cycle_report_pending = True
+    bot._learner = SimpleNamespace(_trade_log=[])
+    bot._fund_mgr = SimpleNamespace(bonus=0.0, _recent_performance_mult=lambda trade_log: 1.0)
+    bot._ml = _ML()
+    bot._risk = SimpleNamespace(
+        state=SimpleNamespace(
+            equity=80.99,
+            peak_equity=81.5,
+            drawdown_pct=0.0,
+            daily_pnl_pct=0.0,
+            open_trade_count=0,
+            consecutive_losses=0,
+        )
+    )
+    bot._equity_curve = [80.0, 80.99]
+    bot._trading = {"mode": "paper", "regime_thresholds": {"default": 45}}
+    bot._starting_equity = 80.0
+    bot._consecutive_wins = 0
+    bot._telegram = _Telegram()
+
+    asyncio.run(
+        bot._maybe_send_fund_manager_report(
+            breakdowns=[],
+            readiness_report=SimpleNamespace(passed=False),
+            jim_status={"ready": False, "trained_on": 0},
+            floating_positions=[],
+            open_positions=[],
+            total_trades=0,
+            win_rate=0.0,
+            sharpe=0.0,
+            cycle_num=1,
+        )
+    )
+
+    assert sent["cycle_num"] == 1
+    assert bot._startup_cycle_report_pending is False

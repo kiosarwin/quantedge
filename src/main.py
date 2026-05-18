@@ -14,6 +14,8 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
+import shutil
 import time
 from pathlib import Path
 
@@ -40,9 +42,39 @@ from src.models.strategy_lifecycle import StrategyLifecycleManager
 from src.data.dataset_logger import DatasetLogger
 from src.analysis.rejection_logger import RejectionLogger
 from src.reporting.attribution import build_attribution_report
+from src.session_clock import active_market_session_key
 
 console = Console()
 log = logging.getLogger("ninja_trader")
+
+
+def cleanup_workspace_artifacts(root: Path | None = None) -> dict[str, int]:
+    """Remove non-essential local artifacts that should not accumulate across runs."""
+    workspace = pathlib.Path(root).resolve() if root is not None else pathlib.Path.cwd().resolve()
+    removed_files = 0
+    removed_dirs = 0
+
+    def _is_runtime_safe(path: Path) -> bool:
+        parts = path.parts
+        return ".git" not in parts and "venv" not in parts and ".venv" not in parts
+
+    for cache_dir in workspace.rglob("__pycache__"):
+        if cache_dir.is_dir() and _is_runtime_safe(cache_dir):
+            shutil.rmtree(cache_dir, ignore_errors=True)
+            removed_dirs += 1
+
+    pytest_cache = workspace / ".pytest_cache"
+    if pytest_cache.exists() and _is_runtime_safe(pytest_cache):
+        shutil.rmtree(pytest_cache, ignore_errors=True)
+        removed_dirs += 1
+
+    for pattern in ("*.pyc", "config/*.bak*", "logs/*test*.log"):
+        for path in workspace.glob(pattern):
+            if path.is_file() and _is_runtime_safe(path):
+                path.unlink(missing_ok=True)
+                removed_files += 1
+
+    return {"files": removed_files, "dirs": removed_dirs}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -149,6 +181,7 @@ class NinjaTrader:
         self._heartbeat_ts = 0.0
         self._tg_heartbeat_ts = 0.0
         self._tg_cycle_report_ts = 0.0
+        self._startup_cycle_report_pending = True
         self._last_fm_report_ts = 0.0       # for fund manager report interval
         self._live_transition_done = False  # guard against double-transition
         self._last_monthly_reset_ts = time.time()
@@ -336,6 +369,14 @@ class NinjaTrader:
         return None
 
     async def start(self) -> None:
+        cleanup_stats = cleanup_workspace_artifacts()
+        if cleanup_stats["files"] or cleanup_stats["dirs"]:
+            log.info(
+                "Workspace cleanup removed %d files and %d directories",
+                cleanup_stats["files"],
+                cleanup_stats["dirs"],
+            )
+
         await self._client.connect()
 
         # Ensure One-Way position mode (Binance defaults to Hedge mode on new accounts)
@@ -477,43 +518,17 @@ class NinjaTrader:
                 _price_map = {sym: snap.last_price for sym, snap in snapshots.items()}
                 _floating = self._trade_mgr.get_floating_pnl(_price_map)
                 _open_positions = self._telegram_open_positions()
-                cycle_report_interval = self._cfg.get("telegram", {}).get(
-                    "cycle_report_interval_minutes", 0
-                ) * 60
-                if (
-                    cycle_report_interval > 0
-                    and time.time() - self._tg_cycle_report_ts > cycle_report_interval
-                ):
-                    self._tg_cycle_report_ts = time.time()
-                    await self._telegram.cycle_report(
-                        breakdowns=breakdowns,
-                        equity=self._risk.state.equity,
-                        drawdown_pct=self._risk.state.drawdown_pct,
-                        daily_pnl_pct=self._risk.state.daily_pnl_pct,
-                        open_trades=self._risk.state.open_trade_count,
-                        cycle_num=_cycle,
-                        ml_ready=self._ml.is_ready,
-                        ml_accuracy=self._ml.cv_accuracy,
-                        paper_trades=_n_trades,
-                        readiness_passed=readiness_report.passed,
-                        consecutive_wins=self._consecutive_wins,
-                        consecutive_losses=self._risk.state.consecutive_losses,
-                        fm_scale=min(
-                            self._ml.kelly_adjustment(_tlog)
-                            * self._fund_mgr._recent_performance_mult(_tlog),
-                            2.0
-                        ),
-                        jim_status=jim_status,
-                        floating_positions=_floating,
-                        open_positions=_open_positions,
-                        closed_positions=_tlog[-5:] if _tlog else [],
-                        win_rate=_win_rate,
-                        sharpe=_sharpe,
-                        total_trades=_n_trades,
-                        regime_thresholds=self._trading.get("regime_thresholds", {}),
-                        jim_bonus=self._fund_mgr.bonus,
-                        starting_equity=self._starting_equity,
-                    )
+                await self._maybe_send_fund_manager_report(
+                    breakdowns=breakdowns,
+                    readiness_report=readiness_report,
+                    jim_status=jim_status,
+                    floating_positions=_floating,
+                    open_positions=_open_positions,
+                    total_trades=_n_trades,
+                    win_rate=_win_rate,
+                    sharpe=_sharpe,
+                    cycle_num=_cycle,
+                )
 
                 # Send Telegram hourly heartbeat after first scoring
                 if _send_tg_heartbeat:
@@ -529,7 +544,6 @@ class NinjaTrader:
                         floating_positions=_floating,
                         open_positions=self._telegram_open_positions(),
                     )
-
                 # ── Monitor open trades ───────────────────────────────────
                 price_map = {sym: snap.last_price for sym, snap in snapshots.items()}
 
@@ -1062,7 +1076,7 @@ class NinjaTrader:
                         "entry_reason": bd.strategy_reason,
                         "timeframe": self._cfg["timeframes"]["primary"],
                         "asset": bd.symbol.split("/")[0],
-                        "session": ("asia" if time.gmtime().tm_hour < 8 else "london" if time.gmtime().tm_hour < 13 else "overlap_london_ny" if time.gmtime().tm_hour < 17 else "ny"),
+                        "session": active_market_session_key(),
                         "volatility_bucket": ("low" if bd.volatility <= 20 else "medium" if bd.volatility <= 40 else "high" if bd.volatility <= 70 else "extreme"),
                         "trend_bucket": ("weak" if bd.trend_strength < 40 else "moderate" if bd.trend_strength < 65 else "strong" if bd.trend_strength < 85 else "very_strong"),
                         "cohort_key": getattr(bd, "cohort_key", ""),
@@ -1340,34 +1354,6 @@ class NinjaTrader:
             self._fund_mgr.reset_monthly(self._risk.state.equity, n_trades)
             self._last_monthly_reset_ts = time.time()
 
-        # Performance report every N minutes
-        report_interval = float(self._safety.get("performance_report_interval_minutes", 5) or 5) * 60
-        n_trades = len(self._learner._trade_log)
-        if report_interval > 0 and time.time() - self._last_fm_report_ts >= report_interval:
-            self._last_fm_report_ts = time.time()
-            fm_report = self._fund_mgr.build_report(
-                self._learner._trade_log,
-                self._risk.state.equity,
-                self._risk.state.peak_equity,
-                self._equity_curve,
-                self._trading["mode"],
-            )
-            await self._telegram.performance_report(
-                fm_report,
-                self._risk.state.equity,
-                self._trading["mode"],
-                open_positions=self._telegram_open_positions(),
-                recent_closed=[
-                    {
-                        "symbol": t.symbol,
-                        "direction": t.direction,
-                        "pnl_usd": t.pnl_usd,
-                        "reason": t.reason,
-                    }
-                    for t in self._learner._trade_log[-3:]
-                ],
-            )
-
         emoji = "✅" if pnl > 0 else "❌"
         console.print(
             f"{emoji} [bold]{trade.symbol}[/bold] {trade.direction.upper()} closed "
@@ -1391,6 +1377,64 @@ class NinjaTrader:
             price=price,
             remaining_contracts=trade.remaining_contracts,
             trailing_stop=trade.trailing_stop,
+        )
+
+    async def _maybe_send_fund_manager_report(
+        self,
+        breakdowns: list[SignalBreakdown],
+        readiness_report,
+        jim_status: dict,
+        floating_positions: list[dict],
+        open_positions: list[dict],
+        total_trades: int,
+        win_rate: float,
+        sharpe: float,
+        cycle_num: int,
+    ) -> None:
+        cycle_minutes = float(
+            self._cfg.get("telegram", {}).get("cycle_report_interval_minutes", 0) or 0
+        )
+        fallback_minutes = float(
+            self._safety.get("performance_report_interval_minutes", 5) or 5
+        )
+        report_interval = (cycle_minutes if cycle_minutes > 0 else fallback_minutes) * 60
+        should_send_now = self._startup_cycle_report_pending
+        if report_interval <= 0:
+            return
+        if not should_send_now and time.time() - self._tg_cycle_report_ts < report_interval:
+            return
+
+        self._startup_cycle_report_pending = False
+        self._tg_cycle_report_ts = time.time()
+        trade_log = self._learner._trade_log
+        await self._telegram.cycle_report(
+            breakdowns=breakdowns,
+            equity=self._risk.state.equity,
+            drawdown_pct=self._risk.state.drawdown_pct,
+            daily_pnl_pct=self._risk.state.daily_pnl_pct,
+            open_trades=self._risk.state.open_trade_count,
+            cycle_num=cycle_num,
+            ml_ready=self._ml.is_ready,
+            ml_accuracy=self._ml.cv_accuracy,
+            paper_trades=total_trades,
+            readiness_passed=readiness_report.passed,
+            consecutive_wins=self._consecutive_wins,
+            consecutive_losses=self._risk.state.consecutive_losses,
+            fm_scale=min(
+                self._ml.kelly_adjustment(trade_log)
+                * self._fund_mgr._recent_performance_mult(trade_log),
+                2.0
+            ),
+            jim_status=jim_status,
+            floating_positions=floating_positions,
+            open_positions=open_positions,
+            closed_positions=trade_log[-5:] if trade_log else [],
+            win_rate=win_rate,
+            sharpe=sharpe,
+            total_trades=total_trades,
+            regime_thresholds=self._trading.get("regime_thresholds", {}),
+            jim_bonus=self._fund_mgr.bonus,
+            starting_equity=self._starting_equity,
         )
 
     async def _transition_to_live(self) -> None:
