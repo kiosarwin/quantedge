@@ -371,6 +371,8 @@ def test_start_clears_transient_persisted_kill_switch(monkeypatch):
         def read_text(self):
             return (
                 '{"mode":"paper","equity":429.85,"peak_equity":500.0,'
+                '"daily_start_equity":410.0,"day_start_ts":111.0,'
+                '"weekly_start_equity":405.0,"week_start_ts":222.0,'
                 '"consecutive_losses":2,"starting_equity":500.0,'
                 '"equity_curve":[432.55],"consecutive_wins":0,'
                 '"kill_switch_reason":"runtime_error_burst"}'
@@ -391,6 +393,11 @@ def test_start_clears_transient_persisted_kill_switch(monkeypatch):
     asyncio.run(_run())
 
     assert bot._risk.state.kill_switch_reason == ""
+    assert bot._risk.state.equity == 429.85
+    assert bot._risk.state.daily_start_equity == 410.0
+    assert bot._risk.state.day_start_ts == 111.0
+    assert bot._risk.state.weekly_start_equity == 405.0
+    assert bot._risk.state.week_start_ts == 222.0
 
 
 def test_fund_manager_does_not_veto_drawdown_only_in_paper_validation():

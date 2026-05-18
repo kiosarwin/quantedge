@@ -42,6 +42,7 @@ from src.models.strategy_lifecycle import StrategyLifecycleManager
 from src.data.dataset_logger import DatasetLogger
 from src.analysis.rejection_logger import RejectionLogger
 from src.reporting.attribution import build_attribution_report
+from src.reporting.bootstrap import build_bootstrap_audit_report, format_bootstrap_audit_lines
 from src.session_clock import active_market_session_key
 
 console = Console()
@@ -410,7 +411,21 @@ class NinjaTrader:
                     self._risk.state.equity = float(persisted.get("equity", self._risk.state.equity))
                     self._risk.state.peak_equity = float(persisted.get("peak_equity", self._risk.state.peak_equity))
                     self._risk.state.consecutive_losses = int(persisted.get("consecutive_losses", 0))
-                    self._risk.state.daily_start_equity = self._risk.state.equity
+                    self._risk.state.daily_start_equity = float(
+                        persisted.get("daily_start_equity", self._risk.state.equity)
+                    )
+                    self._risk.state.day_start_ts = float(
+                        persisted.get("day_start_ts", getattr(self._risk.state, "day_start_ts", time.time()))
+                    )
+                    self._risk.state.weekly_start_equity = float(
+                        persisted.get(
+                            "weekly_start_equity",
+                            getattr(self._risk.state, "weekly_start_equity", self._risk.state.equity),
+                        )
+                    )
+                    self._risk.state.week_start_ts = float(
+                        persisted.get("week_start_ts", getattr(self._risk.state, "week_start_ts", time.time()))
+                    )
                     self._starting_equity = float(persisted.get("starting_equity", self._starting_equity))
                     self._equity_curve = list(persisted.get("equity_curve", []))
                     self._consecutive_wins = int(persisted.get("consecutive_wins", 0))
@@ -509,6 +524,7 @@ class NinjaTrader:
                 readiness_report = self._readiness.check(
                     self._learner._trade_log, self._ml, self._equity_curve
                 )
+                lifecycle_report = self._lifecycle.build_report(self._learner._trade_log)
                 jim_status = self._ml.status_report(self._learner._trade_log)
                 _tlog = self._learner._trade_log
                 _n_trades = len(_tlog)
@@ -521,6 +537,7 @@ class NinjaTrader:
                 await self._maybe_send_fund_manager_report(
                     breakdowns=breakdowns,
                     readiness_report=readiness_report,
+                    lifecycle_report=lifecycle_report,
                     jim_status=jim_status,
                     floating_positions=_floating,
                     open_positions=_open_positions,
@@ -535,10 +552,13 @@ class NinjaTrader:
                     top_names = [
                         f"{b.symbol} {b.direction} {b.total_score:.0f}" for b in breakdowns[:5]
                     ]
+                    _effective_equity, _effective_daily_pnl_pct, _effective_drawdown_pct = (
+                        self._effective_account_metrics(_floating)
+                    )
                     await self._telegram.heartbeat(
-                        equity=self._risk.state.equity,
-                        drawdown_pct=self._risk.state.drawdown_pct,
-                        daily_pnl_pct=self._risk.state.daily_pnl_pct,
+                        equity=_effective_equity,
+                        drawdown_pct=_effective_drawdown_pct,
+                        daily_pnl_pct=_effective_daily_pnl_pct,
                         open_trades=self._risk.state.open_trade_count,
                         top_signals=top_names,
                         floating_positions=_floating,
@@ -571,7 +591,6 @@ class NinjaTrader:
                 signal_max_age = self._trading.get("signal_max_age_seconds", 300)
                 now = time.time()
                 attribution_report = build_attribution_report(self._learner._trade_log, min_trades=2)
-                lifecycle_report = self._lifecycle.build_report(self._learner._trade_log)
 
                 # Update confirmation counters (regime-aware threshold per symbol)
                 for b in breakdowns:
@@ -1379,6 +1398,47 @@ class NinjaTrader:
             trailing_stop=trade.trailing_stop,
         )
 
+    def _effective_account_metrics(self, floating_positions: list[dict] | None = None) -> tuple[float, float, float]:
+        floating_total = sum(float(p.get("pnl_usd", 0.0)) for p in (floating_positions or []))
+        effective_equity = self._risk.state.equity + floating_total
+
+        daily_base = float(self._risk.state.daily_start_equity or 0.0)
+        if daily_base > 0:
+            daily_pnl_pct = (effective_equity - daily_base) / daily_base * 100
+        else:
+            daily_pnl_pct = 0.0
+
+        peak_equity = max(float(self._risk.state.peak_equity or 0.0), effective_equity)
+        if peak_equity > 0:
+            drawdown_pct = max(0.0, (peak_equity - effective_equity) / peak_equity * 100)
+        else:
+            drawdown_pct = 0.0
+
+        return effective_equity, daily_pnl_pct, drawdown_pct
+
+    def _bootstrap_audit_lines(self, lifecycle_report: dict | None = None) -> list[str]:
+        trade_log = self._learner._trade_log
+        edge_memory = None
+        if getattr(self, "_scorer", None) is not None:
+            edge_memory = self._scorer.edge_detector.memory
+        audit = build_bootstrap_audit_report(
+            trade_log,
+            lifecycle_report=lifecycle_report,
+            edge_memory=edge_memory,
+        )
+        lines = format_bootstrap_audit_lines(audit)
+        attribution = build_attribution_report(trade_log, min_trades=2) if trade_log else {}
+        sleeve_rows = attribution.get("by_sleeve", [])[:3]
+        if sleeve_rows:
+            lines.append("Attribution sleeves:")
+            for row in sleeve_rows:
+                pf = row.get("profit_factor", 0.0)
+                pf_str = "inf" if pf == float("inf") else f"{pf:.2f}"
+                lines.append(
+                    f"  `{row['key']}` WR `{row['win_rate']:.0%}` PF `{pf_str}` PnL `${row['net_pnl_usd']:+.2f}`"
+                )
+        return lines
+
     async def _maybe_send_fund_manager_report(
         self,
         breakdowns: list[SignalBreakdown],
@@ -1390,6 +1450,7 @@ class NinjaTrader:
         win_rate: float,
         sharpe: float,
         cycle_num: int,
+        lifecycle_report: dict | None = None,
     ) -> None:
         cycle_minutes = float(
             self._cfg.get("telegram", {}).get("cycle_report_interval_minutes", 0) or 0
@@ -1435,6 +1496,7 @@ class NinjaTrader:
             regime_thresholds=self._trading.get("regime_thresholds", {}),
             jim_bonus=self._fund_mgr.bonus,
             starting_equity=self._starting_equity,
+            bootstrap_audit=self._bootstrap_audit_lines(lifecycle_report),
         )
 
     async def _transition_to_live(self) -> None:
@@ -1602,6 +1664,10 @@ class NinjaTrader:
                 "mode": self._trading["mode"],
                 "equity": self._risk.state.equity,
                 "peak_equity": self._risk.state.peak_equity,
+                "daily_start_equity": self._risk.state.daily_start_equity,
+                "day_start_ts": self._risk.state.day_start_ts,
+                "weekly_start_equity": self._risk.state.weekly_start_equity,
+                "week_start_ts": self._risk.state.week_start_ts,
                 "daily_pnl_pct": self._risk.state.daily_pnl_pct,
                 "weekly_pnl_pct": self._risk.state.weekly_pnl_pct,
                 "drawdown_pct": self._risk.state.drawdown_pct,

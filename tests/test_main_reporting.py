@@ -38,6 +38,7 @@ def test_maybe_send_performance_report_runs_on_interval():
     )
     bot._fund_mgr = SimpleNamespace(bonus=0.0, _recent_performance_mult=lambda trade_log: 1.0)
     bot._ml = _ML()
+    bot._bootstrap_audit_lines = lambda lifecycle_report=None: ["Bootstrap Audit", "Mix: LONG `1` SHORT `0`"]  # type: ignore[assignment]
     bot._risk = SimpleNamespace(
         state=SimpleNamespace(
             equity=80.99,
@@ -73,6 +74,7 @@ def test_maybe_send_performance_report_runs_on_interval():
     assert sent["open_positions"] == [{"symbol": "ETH/USDT:USDT"}]
     assert sent["closed_positions"][0].symbol == "BTC/USDT:USDT"
     assert sent["starting_equity"] == 80.0
+    assert sent["bootstrap_audit"][0] == "Bootstrap Audit"
 
 
 def test_maybe_send_performance_report_sends_immediately_after_start():
@@ -130,3 +132,22 @@ def test_maybe_send_performance_report_sends_immediately_after_start():
 
     assert sent["cycle_num"] == 1
     assert bot._startup_cycle_report_pending is False
+
+
+def test_effective_account_metrics_include_floating_pnl():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._risk = SimpleNamespace(
+        state=SimpleNamespace(
+            equity=80.0,
+            peak_equity=82.0,
+            daily_start_equity=79.0,
+        )
+    )
+
+    equity, daily_pnl_pct, drawdown_pct = bot._effective_account_metrics(
+        [{"pnl_usd": 2.0}, {"pnl_usd": -0.5}]
+    )
+
+    assert equity == 81.5
+    assert round(daily_pnl_pct, 2) == round((81.5 - 79.0) / 79.0 * 100, 2)
+    assert round(drawdown_pct, 2) == round((82.0 - 81.5) / 82.0 * 100, 2)

@@ -252,6 +252,7 @@ class TelegramNotifier:
         regime_thresholds: dict | None = None,
         jim_bonus: float = 0.0,
         starting_equity: float = 0.0,
+        bootstrap_audit: list[str] | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -400,6 +401,11 @@ class TelegramNotifier:
                 )
         else:
             lines.append(f"_No closed trades yet._")
+
+        if bootstrap_audit:
+            lines.append(f"──────────────────────")
+            lines.append(f"🧪 *Bootstrap Audit:*")
+            lines.extend(bootstrap_audit)
 
         # ── Scan Results ─────────────────────────────────────────────
         _rt = regime_thresholds or {}
