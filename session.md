@@ -10,6 +10,7 @@ Last updated: 2026-05-19
 - Commit `6fb20e2` is pushed to `origin/master` and the VM is synced/restarted from that commit.
 - Fresh paper reset remains in effect: persisted trade history and learned state were cleared, and the bot seeds from `$75`.
 - Telegram heartbeat is off; `JIM SIMONS — FUND MANAGER REPORT` remains the primary Telegram cadence every 5 minutes.
+- `CAGR` / `MAR` in the Jim report are now guarded for short histories: 1-decimal display stays, but annualization is suppressed until the sample is deep enough.
 - Live secrets were sanitized out of tracked markdown/config files; runtime `.env` stays on the VM.
 
 ## What Is Already Done
@@ -17,7 +18,7 @@ Last updated: 2026-05-19
 - Initialized git in the correct repo and linked it to GitHub.
 - Removed live credential literals from markdown/config files before commit.
 - Kept runtime artifacts out of the repository via `.gitignore`.
-- Verified repo tests: `34 passed`.
+- Verified repo tests: `34 passed` plus focused Telegram notifier regressions.
 - Deployed the current paper-reset baseline to production VM and restarted the bot successfully.
 
 ## Current Runtime Behavior
