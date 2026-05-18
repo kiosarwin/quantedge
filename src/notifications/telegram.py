@@ -209,15 +209,18 @@ class TelegramNotifier:
         daily_pnl_pct: float,
         open_trades: int,
         top_signals: list[str],
+        floating_positions: list[dict] | None = None,
         open_positions: list[dict] | None = None,
     ) -> None:
         if not self._enabled:
             return
         status = "🟢 Active" if open_trades > 0 else "⏳ Scanning"
         top_line = ", ".join(top_signals[:3]) if top_signals else "none"
+        floating_total = sum(p.get("pnl_usd", 0.0) for p in floating_positions or [])
+        effective_equity = equity + floating_total
         msg = (
             f"🧮 *Heartbeat*\n"
-            f"{status} | Equity *${equity:,.2f}* | Open `{open_trades}`\n"
+            f"{status} | Equity *${effective_equity:,.2f}* | Open `{open_trades}`\n"
             f"P&L `{daily_pnl_pct:+.2f}%` | DD `{drawdown_pct:.1f}%`\n"
             f"Top: {top_line}"
         )

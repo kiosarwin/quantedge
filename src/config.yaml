@@ -142,7 +142,7 @@ safety:
   api_retry_delay_seconds: 5
   heartbeat_interval_seconds: 30
   auto_live_on_readiness: true           # Auto-switch to live when all 7 criteria pass
-  performance_report_interval_trades: 10 # Send fund manager report every N closed trades
+  performance_report_interval_minutes: 5  # Send fund manager report every N minutes
 
 # ── Smart Money Detection ────────────────────────────────────────────────────
 smart_money:

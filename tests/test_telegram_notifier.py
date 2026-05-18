@@ -1,3 +1,4 @@
+import asyncio
 import os
 
 from src.notifications.telegram import TelegramNotifier
@@ -59,3 +60,30 @@ def test_notifier_falls_back_to_plain_text(monkeypatch):
     assert len(calls) == 2
     assert calls[0][1]["parse_mode"] == "Markdown"
     assert "parse_mode" not in calls[1][1]
+
+
+def test_heartbeat_uses_floating_pnl(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+
+    sent = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+
+    asyncio.run(
+        notifier.heartbeat(
+            equity=80.0,
+            drawdown_pct=1.2,
+            daily_pnl_pct=0.5,
+            open_trades=2,
+            top_signals=["BTC long 88", "ETH long 77"],
+            floating_positions=[{"pnl_usd": 5.0}, {"pnl_usd": -1.0}],
+            open_positions=[{"symbol": "BTC/USDT"}],
+        )
+    )
+
+    assert "Equity *$84.00*" in sent["message"]

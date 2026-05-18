@@ -149,7 +149,7 @@ class NinjaTrader:
         self._heartbeat_ts = 0.0
         self._tg_heartbeat_ts = 0.0
         self._tg_cycle_report_ts = 0.0
-        self._last_report_trade_count = 0   # for fund manager report interval
+        self._last_fm_report_ts = 0.0       # for fund manager report interval
         self._live_transition_done = False  # guard against double-transition
         self._last_monthly_reset_ts = time.time()
         self._last_reconcile_ts = 0.0
@@ -526,6 +526,7 @@ class NinjaTrader:
                         daily_pnl_pct=self._risk.state.daily_pnl_pct,
                         open_trades=self._risk.state.open_trade_count,
                         top_signals=top_names,
+                        floating_positions=_floating,
                         open_positions=self._telegram_open_positions(),
                     )
 
@@ -1339,11 +1340,11 @@ class NinjaTrader:
             self._fund_mgr.reset_monthly(self._risk.state.equity, n_trades)
             self._last_monthly_reset_ts = time.time()
 
-        # Performance report every N trades
-        report_interval = self._safety.get("performance_report_interval_trades", 10)
+        # Performance report every N minutes
+        report_interval = float(self._safety.get("performance_report_interval_minutes", 5) or 5) * 60
         n_trades = len(self._learner._trade_log)
-        if n_trades > 0 and n_trades >= self._last_report_trade_count + report_interval:
-            self._last_report_trade_count = n_trades
+        if report_interval > 0 and time.time() - self._last_fm_report_ts >= report_interval:
+            self._last_fm_report_ts = time.time()
             fm_report = self._fund_mgr.build_report(
                 self._learner._trade_log,
                 self._risk.state.equity,
