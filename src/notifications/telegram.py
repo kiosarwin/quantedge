@@ -382,7 +382,7 @@ class TelegramNotifier:
         )
         perf_lines = [
             f"PF `{perf['profit_factor']:.2f}`  WR `{perf['win_rate']:.1%}`  Z-Score `{perf['z_score']:+.2f}`  GHPR `{perf['ghpr_pct']:+.2f}%/trade`",
-            f"CAGR `{perf['cagr_pct']:+.1f}%`  MAR `{perf['mar']:.1f}`  Sharpe `{perf['sharpe']:.2f}`  Sortino `{perf['sortino']:.2f}`",
+            f"CAGR `{perf['cagr_pct']:.1f}%`  MAR `{perf['mar']:.1f}`  Sharpe `{perf['sharpe']:.2f}`  Sortino `{perf['sortino']:.2f}`",
             f"Avg W `{perf['avg_win_pct']:+.2f}%`  Avg L `{perf['avg_loss_pct']:+.2f}%`  Avg W/L `{perf['avg_wl']:.2f}`  Exp `{perf['expectancy_pct']:+.2f}%`",
             f"Recovery `{perf['recovery_factor']:.2f}`  MaxDD `{perf['max_dd_pct']:.1f}%`  Trades `{perf['trades']}`",
         ]
@@ -1085,6 +1085,8 @@ class TelegramNotifier:
     def _cagr_pct(trades: list, starting_equity: float, equity: float) -> float:
         if starting_equity <= 0 or equity <= 0 or not trades:
             return 0.0
+        if len(trades) < 20:
+            return 0.0
         timestamps = [
             float(getattr(t, "closed_at", 0.0) or getattr(t, "opened_at", 0.0) or 0.0)
             for t in trades
@@ -1096,7 +1098,7 @@ class TelegramNotifier:
         if elapsed_seconds <= 0:
             return 0.0
         years = elapsed_seconds / 31557600.0
-        if years <= 0:
+        if years < (90.0 / 365.25):
             return 0.0
         try:
             return ((equity / starting_equity) ** (1 / years) - 1.0) * 100.0
