@@ -25,6 +25,17 @@ Last updated: 2026-05-18
 - Scanner, risk guard, and trade loop are running from the deployed commit.
 - No local commit changes remain after pushing `work -> master`.
 
+## Connection Metadata
+
+- GCP VM: `35.231.37.107`
+- GCP user: `kiosarwin`
+- GCP SSH key: `/root/.ssh/gcp_35_231_37_107`
+- GitHub repo: `git@github.com:kiosarwin/ninja-trader.git`
+- GitHub deploy key: `/root/.ssh/github_ninja_trader_deploy`
+- Local branch: `work`
+- Remote branch target: `master`
+- Do not ask again for these stable connection details unless they change.
+
 ## Important Files
 
 - [`src/main.py`](/home/arwin/ninja_trader/src/main.py)
