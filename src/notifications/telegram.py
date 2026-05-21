@@ -369,7 +369,7 @@ class TelegramNotifier:
             for p in (floating_positions or [])
         )
         balance = self._safe_float(equity)
-        effective_equity = equity + floating_total
+        effective_equity = balance + floating_total
         total_pnl_usd = effective_equity - starting_equity if starting_equity > 0 else 0.0
         total_pnl_pct = (total_pnl_usd / starting_equity * 100) if starting_equity > 0 else 0.0
         total_sign = "+" if total_pnl_usd >= 0 else ""

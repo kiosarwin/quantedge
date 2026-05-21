@@ -542,6 +542,90 @@ def test_start_clears_transient_persisted_kill_switch(monkeypatch):
     assert bot._risk.state.week_start_ts == 222.0
 
 
+def test_start_resets_stale_paper_state_when_reset_token_changes(monkeypatch):
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._trading = {
+        "mode": "paper",
+        "paper_starting_equity": 70,
+        "paper_state_reset_token": "fresh_70_2026_05_21",
+    }
+
+    def _reset_day(equity):
+        bot._risk.state.daily_start_equity = equity
+
+    def _reset_week(equity):
+        bot._risk.state.weekly_start_equity = equity
+
+    bot._risk = SimpleNamespace(
+        state=SimpleNamespace(
+            equity=70.0,
+            peak_equity=70.0,
+            consecutive_losses=0,
+            daily_start_equity=70.0,
+            day_start_ts=0.0,
+            weekly_start_equity=70.0,
+            week_start_ts=0.0,
+            kill_switch_reason="",
+            paused_until_ts=0.0,
+            reset_day=_reset_day,
+            reset_week=_reset_week,
+        ),
+        update_equity=lambda equity: setattr(bot._risk.state, "equity", equity),
+    )
+    bot._client = SimpleNamespace(connect=lambda: None)
+    bot._telegram = SimpleNamespace(
+        startup=lambda *_a, **_k: None,
+        restored_positions=lambda *_a, **_k: None,
+    )
+    bot._cfg = {}
+    bot._starting_equity = 0.0
+    bot._equity_curve = []
+    bot._equity_graph_points = []
+    bot._consecutive_wins = 0
+    bot._running = False
+    bot._heartbeat_ts = 0.0
+    bot._tg_heartbeat_ts = 0.0
+    bot._paper_validation = {}
+    bot._safety = {}
+    bot._telegram_open_positions = lambda: []
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    class _PathStub:
+        def exists(self):
+            return True
+
+        def read_text(self):
+            return (
+                '{"mode":"paper","equity":33.17,"peak_equity":80.0,'
+                '"daily_start_equity":80.0,"day_start_ts":111.0,'
+                '"weekly_start_equity":80.0,"week_start_ts":222.0,'
+                '"consecutive_losses":4,"starting_equity":70.0,'
+                '"equity_curve":[80.0,33.17],"consecutive_wins":0,'
+                '"kill_switch_reason":"manual","paper_state_reset_token":"old"}'
+            )
+
+    monkeypatch.setattr(main_module, "Path", lambda *_a, **_k: _PathStub())
+    monkeypatch.setattr(bot._client, "connect", _noop)
+    monkeypatch.setattr(bot._telegram, "startup", _noop)
+    monkeypatch.setattr(bot._telegram, "restored_positions", _noop)
+    bot._loop = _noop
+    bot._shutdown = _noop
+
+    import asyncio
+
+    asyncio.run(NinjaTrader.start(bot))
+
+    assert bot._risk.state.equity == 70.0
+    assert bot._risk.state.peak_equity == 70.0
+    assert bot._risk.state.consecutive_losses == 0
+    assert bot._risk.state.kill_switch_reason == ""
+    assert bot._equity_curve == [70.0]
+    assert bot._risk.state.daily_start_equity == 70.0
+    assert bot._risk.state.weekly_start_equity == 70.0
+
+
 def test_fund_manager_does_not_veto_drawdown_only_in_paper_validation():
     fm = FundManager(
         {

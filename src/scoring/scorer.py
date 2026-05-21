@@ -446,7 +446,10 @@ class Scorer:
                 volume_confirmation=vol_score,
                 volatility=vs,
             )
-            if self._strategy_router.is_short_reversal_candidate(reversal_probe):
+            if (
+                self._strategy_router.is_short_reversal_candidate(reversal_probe)
+                or self._strategy_router.is_long_reversal_candidate(reversal_probe)
+            ):
                 regime_ok = True
 
         # ── 5. EV model gate (setup-specific p_win via PwinEngine) ─────

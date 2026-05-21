@@ -479,37 +479,78 @@ class NinjaTrader:
             if sp.exists():
                 persisted = json.loads(sp.read_text())
                 if persisted.get("mode") == self._trading["mode"]:
-                    self._risk.state.equity = float(persisted.get("equity", self._risk.state.equity))
-                    self._risk.state.peak_equity = float(persisted.get("peak_equity", self._risk.state.peak_equity))
-                    self._risk.state.consecutive_losses = int(persisted.get("consecutive_losses", 0))
-                    self._risk.state.daily_start_equity = float(
-                        persisted.get("daily_start_equity", self._risk.state.equity)
-                    )
-                    self._risk.state.day_start_ts = float(
-                        persisted.get("day_start_ts", getattr(self._risk.state, "day_start_ts", time.time()))
-                    )
-                    self._risk.state.weekly_start_equity = float(
-                        persisted.get(
-                            "weekly_start_equity",
-                            getattr(self._risk.state, "weekly_start_equity", self._risk.state.equity),
+                    paper_reset_token = str(self._trading.get("paper_state_reset_token", "") or "")
+                    persisted_reset_token = str(persisted.get("paper_state_reset_token", "") or "")
+                    reset_paper_state = False
+                    # Paper-mode safety: when config explicitly sets a paper starting equity,
+                    # treat that as a reset anchor if it differs from the persisted state.
+                    # This prevents a stale drawdown/peak from permanently freezing paper runs.
+                    if (
+                        self._trading["mode"] == "paper"
+                        and paper_equity
+                        and (
+                            float(persisted.get("starting_equity", 0.0) or 0.0) != float(paper_equity)
+                            or (
+                                paper_reset_token
+                                and persisted_reset_token != paper_reset_token
+                            )
                         )
-                    )
-                    self._risk.state.week_start_ts = float(
-                        persisted.get("week_start_ts", getattr(self._risk.state, "week_start_ts", time.time()))
-                    )
-                    self._starting_equity = float(persisted.get("starting_equity", self._starting_equity))
-                    self._equity_curve = list(persisted.get("equity_curve", []))
-                    self._equity_graph_points = list(persisted.get("equity_graph_points", []))
-                    self._consecutive_wins = int(persisted.get("consecutive_wins", 0))
-                    persisted_kill = str(persisted.get("kill_switch_reason", "") or "")
-                    transient_kills = {"runtime_error_burst", "balance_fetch_failure"}
-                    if persisted_kill and persisted_kill not in transient_kills:
-                        self._risk.state.kill_switch_reason = persisted_kill
-                    elif persisted_kill:
+                    ):
                         log.info(
-                            "Cleared persisted transient kill switch on startup: %s",
-                            persisted_kill,
+                            "Paper state mismatch: persisted starting_equity=$%.2f token=%s vs config paper_starting_equity=$%.2f token=%s",
+                            float(persisted.get("starting_equity", 0.0) or 0.0),
+                            persisted_reset_token or "-",
+                            float(paper_equity),
+                            paper_reset_token or "-",
                         )
+                        self._risk.update_equity(float(paper_equity))
+                        self._risk.state.peak_equity = float(paper_equity)
+                        self._risk.state.consecutive_losses = 0
+                        self._risk.state.reset_day(float(paper_equity))
+                        self._risk.state.reset_week(float(paper_equity))
+                        self._starting_equity = float(paper_equity)
+                        self._equity_curve = [float(paper_equity)]
+                        self._equity_graph_points = []
+                        self._consecutive_wins = 0
+                        self._risk.state.kill_switch_reason = ""
+                        self._risk.state.paused_until_ts = 0.0
+                        log.info(
+                            "Paper reset: ignoring persisted state and re-seeding equity to $%.2f",
+                            float(paper_equity),
+                        )
+                        reset_paper_state = True
+                    if not reset_paper_state:
+                        self._risk.state.equity = float(persisted.get("equity", self._risk.state.equity))
+                        self._risk.state.peak_equity = float(persisted.get("peak_equity", self._risk.state.peak_equity))
+                        self._risk.state.consecutive_losses = int(persisted.get("consecutive_losses", 0))
+                        self._risk.state.daily_start_equity = float(
+                            persisted.get("daily_start_equity", self._risk.state.equity)
+                        )
+                        self._risk.state.day_start_ts = float(
+                            persisted.get("day_start_ts", getattr(self._risk.state, "day_start_ts", time.time()))
+                        )
+                        self._risk.state.weekly_start_equity = float(
+                            persisted.get(
+                                "weekly_start_equity",
+                                getattr(self._risk.state, "weekly_start_equity", self._risk.state.equity),
+                            )
+                        )
+                        self._risk.state.week_start_ts = float(
+                            persisted.get("week_start_ts", getattr(self._risk.state, "week_start_ts", time.time()))
+                        )
+                        self._starting_equity = float(persisted.get("starting_equity", self._starting_equity))
+                        self._equity_curve = list(persisted.get("equity_curve", []))
+                        self._equity_graph_points = list(persisted.get("equity_graph_points", []))
+                        self._consecutive_wins = int(persisted.get("consecutive_wins", 0))
+                        persisted_kill = str(persisted.get("kill_switch_reason", "") or "")
+                        transient_kills = {"runtime_error_burst", "balance_fetch_failure"}
+                        if persisted_kill and persisted_kill not in transient_kills:
+                            self._risk.state.kill_switch_reason = persisted_kill
+                        elif persisted_kill:
+                            log.info(
+                                "Cleared persisted transient kill switch on startup: %s",
+                                persisted_kill,
+                            )
                     log.info(
                         "Restored state — equity=$%.2f peak=$%.2f start=$%.2f curve=%d pts losses=%d wins=%d",
                         self._risk.state.equity, self._risk.state.peak_equity,
@@ -649,7 +690,7 @@ class NinjaTrader:
                         f"{b.symbol} {b.direction} {b.total_score:.0f}" for b in breakdowns[:5]
                     ]
                     await self._telegram.heartbeat(
-                        equity=_effective_equity,
+                        equity=self._risk.state.equity,
                         drawdown_pct=_effective_drawdown_pct,
                         daily_pnl_pct=_effective_daily_pnl_pct,
                         open_trades=self._risk.state.open_trade_count,
@@ -1800,6 +1841,11 @@ class NinjaTrader:
             state = {
                 "updated_at": time.time(),
                 "mode": self._trading["mode"],
+                "paper_state_reset_token": (
+                    str(self._trading.get("paper_state_reset_token", "") or "")
+                    if self._trading["mode"] == "paper"
+                    else ""
+                ),
                 "equity": self._risk.state.equity,
                 "peak_equity": self._risk.state.peak_equity,
                 "daily_start_equity": self._risk.state.daily_start_equity,

@@ -15,7 +15,8 @@ trading:
   mode: paper                      # paper | live | backtest
   exploration_mode: false          # false = paper validates production gates instead of taking exploratory losses
   base_currency: USDT
-  paper_starting_equity: 75        # Reset fresh paper run from $75
+  paper_starting_equity: 70        # Reset fresh paper run from $70
+  paper_state_reset_token: "fresh_70_2026_05_21"
   min_score_threshold: 45          # Lower paper threshold so valid R/S/X candidates can convert into real samples
   max_open_trades: 1               # One position until the bot proves positive expectancy
   top_pairs_to_trade: 1
@@ -88,7 +89,7 @@ risk:
   cooldown_after_loss_streak: 2    # After N consecutive losses, pause new entries temporarily
   cooldown_minutes: 30
   max_symbol_risk_pct: 1.25        # total concurrent risk allowed on one asset
-  max_direction_risk_pct: 4.00     # total concurrent risk allowed per side for fresh $75 paper sampling
+  max_direction_risk_pct: 4.00     # total concurrent risk allowed per side for fresh $70 paper sampling
 
 exit:
   tp1_r_multiple: 1.5
