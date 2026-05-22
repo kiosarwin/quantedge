@@ -84,8 +84,11 @@ def detect_smart_money(
     ind_cfg = cfg.get("indicators", {})
     struct_cfg = cfg.get("structure", {})
 
-    oi_acc_thresh = sm_cfg.get("oi_accumulation_threshold_pct", 2.0)
-    oi_dist_thresh = sm_cfg.get("oi_distribution_threshold_pct", -1.0)
+    # FIXED: Use config values with REALISTIC defaults for perpetual futures.
+    # OI change per 1h snapshot on Binance is typically 0.05-0.5%.
+    # A 0.15% rise per hour IS accumulation. A 2% threshold would never fire.
+    oi_acc_thresh = float(sm_cfg.get("oi_accumulation_threshold_pct", 0.15))
+    oi_dist_thresh = float(sm_cfg.get("oi_distribution_threshold_pct", -0.10))
     price_stag_pct = sm_cfg.get("price_stagnation_pct", 0.5) / 100
     funding_extreme = sm_cfg.get("funding_extreme_threshold", 0.05)
     vol_lookback = ind_cfg.get("volume_lookback", 20)
@@ -188,15 +191,20 @@ def detect_smart_money(
         )
 
     # DISTRIBUTION: OI building + price stagnant/down + extreme positive funding
+    # UPGRADED: Also detect distribution when OI is FALLING (positions closing = unwinding)
+    # or when funding is extreme even without OI threshold hit.
     is_distribution = (
-        oi_change_pct >= oi_acc_thresh
-        and price_is_flat
-        and (funding_rate > funding_extreme or ls_crowded_long)
+        (oi_change_pct >= oi_acc_thresh and price_is_flat and
+         (funding_rate > funding_extreme or ls_crowded_long))
+        or (funding_rate > funding_extreme * 1.5 and ls_crowded_long)  # NEW: extreme crowding alone
+        or (oi_change_pct <= oi_dist_thresh and funding_rate > funding_extreme)  # NEW: OI drop + high funding
     )
     if is_distribution:
-        score = 65.0 + min(20.0, abs(funding_rate) / funding_extreme * 10)
+        score = 68.0 + min(22.0, abs(funding_rate) / funding_extreme * 12)
         if taker_buy_ratio < 0.45:
             score += 10.0  # aggressive sellers dominating
+        if ls_crowded_long and funding_rate > funding_extreme:
+            score += 5.0   # double confirmation
         return SmartMoneySignal(
             phase=SmartMoneyPhase.DISTRIBUTION,
             score=min(100.0, score),
@@ -209,16 +217,19 @@ def detect_smart_money(
         )
 
     # ACCUMULATION: OI rising + price flat/slightly rising + neutral/low funding
+    # UPGRADED: Also detect when taker buy ratio is very high (buyers absorbing)
     is_accumulation = (
-        oi_change_pct >= oi_acc_thresh
-        and price_is_flat
-        and funding_rate < funding_extreme
-        and not ls_crowded_long
+        (oi_change_pct >= oi_acc_thresh and price_is_flat and
+         funding_rate < funding_extreme and not ls_crowded_long)
+        or (taker_buy_ratio > 0.60 and oi_change_pct > 0 and price_is_flat
+            and funding_rate < funding_extreme * 0.5)  # NEW: strong buying absorption
     )
     if is_accumulation:
-        score = 60.0 + min(25.0, oi_change_pct / oi_acc_thresh * 10)
+        score = 63.0 + min(25.0, oi_change_pct / max(oi_acc_thresh, 0.01) * 12)
         if taker_buy_ratio > 0.55:
             score += 10.0  # aggressive buyers absorbing supply
+        if vol_r > 1.5:
+            score += 5.0   # elevated volume confirms accumulation
         return SmartMoneySignal(
             phase=SmartMoneyPhase.ACCUMULATION,
             score=min(100.0, score),
@@ -233,7 +244,7 @@ def detect_smart_money(
     # TRENDING: OI + price both rising/falling (trend continuation)
     oi_rising_strongly = oi_change_pct >= oi_acc_thresh
     if oi_rising_strongly and not price_is_flat:
-        score = 70.0 + min(15.0, vol_r * 5)
+        score = 72.0 + min(18.0, vol_r * 6)  # Upgraded: higher base + vol bonus
         direction_bias = "long" if price_rising else "short"
         return SmartMoneySignal(
             phase=SmartMoneyPhase.TRENDING,

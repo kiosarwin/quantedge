@@ -102,12 +102,10 @@ class Learner:
         if not wins or not losses:
             return
 
-        # Average signal scores for wins vs losses
+        # ── Standard signal-level adjustment ──────────────────────────
         win_avg = self._avg_scores(wins, signal_keys)
         loss_avg = self._avg_scores(losses, signal_keys)
 
-        # Nudge weights: signals higher in wins than losses get a boost
-        total_adj = 0.0
         for key in signal_keys:
             win_s = win_avg.get(key, 50.0)
             loss_s = loss_avg.get(key, 50.0)
@@ -115,7 +113,12 @@ class Learner:
             adjustment = delta * self._adj_rate
             old = self._weights[key]
             self._weights[key] = max(1.0, old + adjustment)
-            total_adj += adjustment
+
+        # ── NEW: Regime × Direction weight modulation ─────────────────
+        # Learns which signals matter MORE in specific regime-direction combos.
+        # E.g., "structure_quality" matters more for short-in-distribution than
+        # for long-in-trending. This gives the bot adaptive edge per context.
+        self._regime_direction_adjust(recent, signal_keys)
 
         # Re-normalise to keep total weight sum unchanged
         total = sum(self._weights.values())
@@ -129,6 +132,54 @@ class Learner:
 
         if self._scorer is not None:
             self._scorer.update_weights(self._weights)
+
+    def _regime_direction_adjust(self, recent: list["TradeRecord"], signal_keys: list[str]) -> None:
+        """
+        Per regime×direction learning: boost weights that predict wins
+        within each specific context. This makes the bot smarter over time
+        about WHAT matters in each market condition.
+
+        Practical impact: if "open_interest" is the winning signal in
+        distribution+short trades but not in trending+long trades, the
+        weight adjusts accordingly across the combined pool.
+        """
+        from collections import defaultdict
+
+        # Group trades by regime × direction
+        groups: dict[str, list] = defaultdict(list)
+        for t in recent:
+            key = f"{getattr(t, 'regime', 'unknown')}|{t.direction}"
+            groups[key].append(t)
+
+        # Only learn from groups with enough samples (≥4 trades)
+        regime_adj_rate = self._adj_rate * 0.5  # Half the normal rate (conservative)
+
+        for group_key, trades in groups.items():
+            if len(trades) < 4:
+                continue
+
+            group_wins = [t for t in trades if t.pnl_usd > 0]
+            group_losses = [t for t in trades if t.pnl_usd <= 0]
+
+            if not group_wins or not group_losses:
+                continue
+
+            # Win rate in this group
+            wr = len(group_wins) / len(trades)
+
+            # If this regime×direction combo has HIGH win rate (>60%),
+            # boost the signals that are elevated in its winning trades.
+            # If LOW win rate (<40%), dampen the signals that led us astray.
+            if wr >= 0.60:
+                win_avg = self._avg_scores(group_wins, signal_keys)
+                for key in signal_keys:
+                    boost = (win_avg.get(key, 50.0) - 50.0) / 50.0 * regime_adj_rate
+                    self._weights[key] = max(1.0, self._weights[key] + boost)
+            elif wr <= 0.40:
+                loss_avg = self._avg_scores(group_losses, signal_keys)
+                for key in signal_keys:
+                    penalty = (loss_avg.get(key, 50.0) - 50.0) / 50.0 * regime_adj_rate
+                    self._weights[key] = max(1.0, self._weights[key] - penalty * 0.5)
 
     @staticmethod
     def _avg_scores(trades: list[TradeRecord], keys: list[str]) -> dict[str, float]:
