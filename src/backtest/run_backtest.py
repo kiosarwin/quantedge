@@ -48,6 +48,12 @@ async def run(args: argparse.Namespace) -> None:
     cfg["exchange"]["api_key"] = ""
     cfg["exchange"]["api_secret"] = ""
 
+    # Fail-fast schema validation. Backtests refuse to run on a broken config
+    # for the same reason the live bot does — silent typos in risk / EV / Kelly
+    # produce misleading historical results.
+    from src.config import validate_config
+    validate_config(cfg)
+
     # CLI overrides
     bt = cfg["backtest"]
     start = args.start or bt["start_date"]
@@ -119,7 +125,14 @@ def main() -> None:
     parser.add_argument("--end", default=None, help="End date YYYY-MM-DD")
     parser.add_argument("--capital", type=float, default=None)
     args = parser.parse_args()
-    asyncio.run(run(args))
+    try:
+        asyncio.run(run(args))
+    except Exception as exc:
+        from src.config import ConfigValidationError
+        if isinstance(exc, ConfigValidationError):
+            console.print(f"[red]{exc}[/red]")
+            sys.exit(2)
+        raise
 
 
 if __name__ == "__main__":

@@ -183,6 +183,10 @@ def test_run_bootstrap_audit_now_sends_once_and_exits(monkeypatch):
     monkeypatch.setattr(main_module, "setup_logging", lambda cfg: None)
     monkeypatch.setattr(main_module, "load_config", lambda path: {"telegram": {"bootstrap_audit_interval_hours": 12}, "trading": {"mode": "paper"}, "exchange": {}})
     monkeypatch.setattr(main_module, "normalize_config", lambda cfg: cfg)
+    # Bypass the pydantic schema gate — this test uses a deliberately stub
+    # config to exercise the bootstrap-audit-now path without the full
+    # production yaml.
+    monkeypatch.setattr(main_module, "validate_config", lambda cfg: cfg)
 
     asyncio.run(
         main_module._run(
