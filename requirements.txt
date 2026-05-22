@@ -6,6 +6,7 @@ pandas-ta
 scipy
 scikit-learn
 xgboost
+pydantic
 pyyaml
 aiohttp
 websockets

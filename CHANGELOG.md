@@ -4,6 +4,100 @@
 
 ---
 
+## [Unreleased] — Fail-fast pydantic schema validation for `config.yaml`
+
+### Why
+Bot call sites use raw dict access (`cfg["risk"]["risk_per_trade_pct"]`),
+which silently degrades when a key is mistyped or omitted: the offending
+stage either trades with the wrong knob or freezes at runtime. Canonical
+"blew up the account" failure mode: `kelly.max_kelly_pct: 4.0` becomes
+`40` (or `risk.max_drawdown_pct: 25.0` becomes `250`) without anything
+noticing until the first oversized loss.
+
+This adds a fail-fast schema gate at boot. A typo in any risk-critical
+field is now caught with a structured operator message and a non-zero exit
+code, instead of silently shifting risk posture or freezing the bot at
+runtime.
+
+### What
+| File | Change |
+|---|---|
+| `src/config/__init__.py` | **NEW.** Exposes `validate_config(cfg) -> dict`, identity-preserving (returns the same dict) so existing dict-access call sites keep working. Also exposes `ConfigValidationError` with a structured multi-issue message. |
+| `src/config/schema.py` | **NEW.** Pydantic v2 schema. Strict on risk-critical sections (`exchange`, `trading`, `risk`, `exit`, `kelly`, `ev_model`, `safety`); lax on additive sections (extra keys pass through). |
+| `src/main.py` | `_run()` validates after env injection and CLI overrides (so `--mode live` against a config still on testnet is caught at boot). `main()` catches `ConfigValidationError` and exits 2 with the structured summary. |
+| `src/backtest/run_backtest.py` | Same validation hook — backtests refuse to run on a broken config. |
+| `requirements.txt` | `pydantic` added. |
+
+### What gets validated
+
+**Strict (typed pydantic models with bounded ranges):**
+
+| Section | Key fields enforced |
+|---|---|
+| `exchange` | `testnet` (bool), `recv_window` in (0, 60000] |
+| `trading` | `mode` (Literal), `paper_starting_equity > 0`, score thresholds in [0, 100], scan/refresh/age intervals bounded |
+| `risk` | per-trade caps in (0, 10]%, `max_drawdown_pct` in (0, 100]%, leverage in (0, 125] (Binance ceiling) |
+| `exit` | TP/trail sizes must sum to ~1.0, `tp2_r_multiple > tp1_r_multiple`, `max_hold_duration_s` bounded at 30d |
+| `kelly` | `max_kelly_pct` in (0, 10] — catches `4.0 → 40` typo |
+| `ev_model` | probabilities in [0, 1], priors and fee % bounded |
+| `safety` | kill-switch counts, heartbeat intervals, equity-mismatch tolerance, `session_size_multipliers` per-key in (0, 5] |
+
+**Cross-field consistency rules:**
+- `risk.max_risk_per_trade_pct >= risk_per_trade_pct`
+- `risk.default_leverage <= max_leverage`
+- `risk.max_symbol_risk_pct >= max_risk_per_trade_pct` — catches "single-symbol cap silently blocks every entry"
+- `exit.tp1_size + tp2_size + trail_size ≈ 1.0`
+- `exit.tp2_r_multiple > tp1_r_multiple`
+- `kelly.min_kelly_pct <= max_kelly_pct`
+- `ev_model.max_kelly_pct <= kelly.max_kelly_pct` — Kelly is the absolute hard cap
+- `trading.mode == "live"` is incompatible with `exchange.testnet=true`
+
+**Lax (raw `dict`) — by design:**
+`indicators`, `strategy`, `lifecycle`, `edge_policy`, `paper_validation`,
+`smart_money`, `regime`, `execution`, `derivatives`, `shadow`,
+`timeframes`, `filters`, `telegram`, `learning`, `backtest`, `logging`,
+`order_book`, `structure`, `scoring`, `exit_profiles`, `ml`. Strict mode
+on these would break additive YAML changes without catching dangerous
+typos. Promote individual sections to dedicated models incrementally as
+strictness becomes warranted.
+
+### Sample boot failure
+
+When a config has `kelly.max_kelly_pct: 40`, `risk.max_drawdown_pct: 250`,
+exit sizes summing to 1.2, and `trading.paper_starting_equity: 0`:
+
+```
+[CONFIG VALIDATION FAILED]
+  4 issue(s):
+    - trading.paper_starting_equity: Input should be greater than 0
+    - risk.max_drawdown_pct: Input should be less than or equal to 100
+    - exit: Value error, tp1_size_pct + tp2_size_pct + trail_size_pct must sum to ~1.0, got 1.2000
+    - kelly.max_kelly_pct: Input should be less than or equal to 10
+
+  Fix the YAML and re-run. The bot deliberately refuses to start with an invalid config.
+```
+
+Exit status `2`. No traceback noise.
+
+### Tests
+- `tests/test_config_schema.py` — **26 cases** covering: production
+  `config/config.yaml` validates clean (tripwire); identity preservation
+  (existing dict-access call sites unaffected); each cross-field rule
+  rejects its specific typo class with a localised error; each bounded-
+  range typo class is caught; lax sections accept extra keys (regression
+  guard); missing required top-level section is rejected.
+- Suite total: **200 / 200 pass** on Python 3.11 (174 baseline + 26 new).
+
+### Out of scope (deferred)
+- Promoting lax sections (e.g. `strategy`, `lifecycle`, `edge_policy`) to
+  dedicated typed models. Each promotion is a separate, incremental PR.
+- Migrating env-var injection to `pydantic-settings`. Current manual
+  injection works; this is a future cleanup.
+- Schema for `paper_validation` section — currently lax because the keys
+  are still being iterated on during paper bootstrap.
+
+---
+
 ## [Unreleased] — Telegram visibility for Phase D / Liq Sweep short setups
 
 ### Added — surface the new short-side edges in Telegram reports

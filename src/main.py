@@ -46,6 +46,7 @@ from src.analysis.rejection_logger import RejectionLogger
 from src.reporting.attribution import build_attribution_report
 from src.reporting.bootstrap import build_bootstrap_audit_report, format_bootstrap_audit_lines
 from src.session_clock import active_market_session_key
+from src.config import validate_config, ConfigValidationError
 
 console = Console()
 log = logging.getLogger("ninja_trader")
@@ -2345,6 +2346,13 @@ async def _run(args: argparse.Namespace) -> None:
         cfg["trading"]["mode"] = args.mode
     if args.testnet is not None:
         cfg["exchange"]["testnet"] = args.testnet
+    # Fail-fast schema validation AFTER env injection and CLI overrides so
+    # `--mode live` against a config still set to testnet=true is caught at
+    # boot, not at first trade. Identity-preserving — returns the same dict.
+    # Catches risk-critical typos (kelly.max_kelly_pct: 4.0 -> 40, exit
+    # sizing not summing to 1.0, etc.) instead of silently trading with the
+    # wrong knob until the first oversized loss surfaces it.
+    validate_config(cfg)
     cfg = normalize_config(cfg)
 
     setup_logging(cfg)
@@ -2397,7 +2405,12 @@ def main() -> None:
         asyncio.run(_run(args))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted by user.[/yellow]")
-
+    except ConfigValidationError as exc:
+        # Print the structured multi-issue summary directly to stderr so
+        # operators see the full issue list, not a Python traceback.
+        console.print(f"[red]{exc}[/red]")
+        import sys
+        sys.exit(2)
 
 if __name__ == "__main__":
     main()
