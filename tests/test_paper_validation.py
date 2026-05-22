@@ -325,6 +325,50 @@ def test_paper_trade_scope_allows_only_long_trending_expansion_by_default():
     assert sleeve_reason == "sleeve=neutral not in ['trend_following']"
 
 
+def test_paper_trade_scope_supports_direction_specific_sleeves():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._trading = {"mode": "paper"}
+    bot._paper_validation = {
+        "enabled": True,
+        "allowed_directions": ["long", "short"],
+        "allowed_regimes": ["trending_expansion", "distribution"],
+        "allowed_strategy_sleeves": ["trend_following", "reversal", "compression_breakout"],
+        "allowed_long_strategy_sleeves": ["trend_following"],
+        "allowed_short_strategy_sleeves": ["trend_following", "reversal", "compression_breakout"],
+    }
+
+    long_ok = SimpleNamespace(
+        direction="long",
+        regime=SimpleNamespace(value="trending_expansion"),
+        strategy_sleeve="trend_following",
+    )
+    long_blocked = SimpleNamespace(
+        direction="long",
+        regime=SimpleNamespace(value="trending_expansion"),
+        strategy_sleeve="reversal",
+    )
+    short_ok = SimpleNamespace(
+        direction="short",
+        regime=SimpleNamespace(value="distribution"),
+        strategy_sleeve="reversal",
+    )
+    short_blocked = SimpleNamespace(
+        direction="short",
+        regime=SimpleNamespace(value="distribution"),
+        strategy_sleeve="neutral",
+    )
+
+    assert bot._paper_trade_scope_allowed(long_ok) is True
+    assert bot._paper_trade_scope_allowed(long_blocked) is False
+    assert bot._paper_trade_scope_allowed(short_ok) is True
+    assert bot._paper_trade_scope_allowed(short_blocked) is False
+
+    _, long_reason = bot._paper_trade_scope_check(long_blocked)
+    _, short_reason = bot._paper_trade_scope_check(short_blocked)
+    assert long_reason == "sleeve=reversal not in ['trend_following']"
+    assert short_reason == "sleeve=neutral not in ['compression_breakout', 'reversal', 'trend_following']"
+
+
 def test_scorer_paper_soft_ev_allows_small_negative_expectancy_before_hard_gate():
     scorer = Scorer.__new__(Scorer)
     scorer._paper_mode = True

@@ -50,6 +50,12 @@ paper_validation:
     - trend_following
     - reversal
     - compression_breakout
+  allowed_long_strategy_sleeves:
+    - trend_following
+  allowed_short_strategy_sleeves:
+    - trend_following
+    - reversal
+    - compression_breakout
   max_open_trades_override: 5
   top_pairs_to_trade_override: 5
   threshold_relaxation: 7.0

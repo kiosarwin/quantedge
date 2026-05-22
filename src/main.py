@@ -258,9 +258,23 @@ class NinjaTrader:
             self._paper_validation.get("allowed_regimes", ["trending_expansion"])
             or ["trending_expansion"]
         )
-        allowed_sleeves = set(
+        global_allowed_sleeves = set(
             self._paper_validation.get("allowed_strategy_sleeves", ["trend_following"])
             or ["trend_following"]
+        )
+        allowed_long_sleeves = set(
+            self._paper_validation.get(
+                "allowed_long_strategy_sleeves",
+                sorted(global_allowed_sleeves),
+            )
+            or sorted(global_allowed_sleeves)
+        )
+        allowed_short_sleeves = set(
+            self._paper_validation.get(
+                "allowed_short_strategy_sleeves",
+                sorted(global_allowed_sleeves),
+            )
+            or sorted(global_allowed_sleeves)
         )
         direction = str(getattr(breakdown, "direction", "") or "")
         regime = breakdown.regime.value if breakdown.regime else ""
@@ -269,6 +283,12 @@ class NinjaTrader:
             return False, f"direction={direction} not in {sorted(allowed_directions)}"
         if regime not in allowed_regimes:
             return False, f"regime={regime or 'unknown'} not in {sorted(allowed_regimes)}"
+        if direction == "long":
+            allowed_sleeves = allowed_long_sleeves
+        elif direction == "short":
+            allowed_sleeves = allowed_short_sleeves
+        else:
+            allowed_sleeves = global_allowed_sleeves
         if sleeve not in allowed_sleeves:
             return False, f"sleeve={sleeve} not in {sorted(allowed_sleeves)}"
         return True, "paper scope ok"
