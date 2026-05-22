@@ -73,6 +73,68 @@ down if you want faster recovery from a flaky exchange.
 
 ---
 
+## [Unreleased] — Reproducible installs via `requirements.lock`
+
+### Why
+`requirements.txt` listed every direct dep without version pins. On any
+redeploy, `pip install -r requirements.txt` would resolve to whatever PyPI
+offered that day. For a bot whose risk math, EV gate, and ML soft gate all
+depend on numerical libraries (numpy, pandas, scikit-learn, xgboost, ccxt),
+this is a silent capital risk — a sklearn or xgboost minor bump can shift
+`predict_proba` outputs and change which setups pass the gate without any
+test or log surfacing it. The lock file makes installs reproducible across
+CI / dev / paper VM / live VM.
+
+### What
+| File | Change |
+|---|---|
+| `requirements.lock` | **NEW.** Full transitive pin (65 packages) generated from a clean Python 3.11 venv. Source of truth for installs. |
+| `requirements.txt` | Annotated with regeneration instructions. **`pandas-ta` removed** (zero imports in `src/` and `tests/`; current PyPI versions require Python >= 3.12 which would force an unjustified interpreter bump). |
+| `requirements-dev.txt` | **NEW.** Dev-only deps (`pytest`). Install on top of `requirements.lock` for CI / local test runs. |
+| `.python-version` | **NEW.** Pins baseline interpreter to `3.11` (codebase uses `from datetime import UTC` which is 3.11+). |
+| `runbook.md` | New **Pinned dependencies** section: install workflow, lock regeneration, lock-as-upgrade discipline, VM alignment procedure. |
+
+### How to install going forward
+```bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.lock                          # runtime
+pip install -r requirements.lock -r requirements-dev.txt  # + tests
+```
+
+**Never** `pip install -r requirements.txt` for paper or live runs.
+
+### Verification
+- Fresh Python 3.11 venv built from `requirements.lock` runs the full test
+  suite cleanly: **175 / 175 pass** (matplotlib included; the previously
+  deselected `test_equity_graph_report_sends_png_photo` now also runs).
+
+### Behavioral note for the reviewer
+The committed lock is a fresh resolution from the build machine (May 2026).
+It is not guaranteed to match the currently running paper VM byte-for-byte.
+Two options before merging (also documented in `runbook.md`):
+
+1. **Treat as deliberate upgrade** — accept the lock as the new baseline,
+   `pip install --force-reinstall -r requirements.lock` on the live VM,
+   re-run `pytest -q`, and consider whether a paper-state reset is warranted
+   if math-relevant libs (numpy / pandas / scipy / sklearn / xgboost / ccxt)
+   shifted.
+2. **Capture VM state instead** — on the running paper VM, run `pip freeze
+   | sort -f > vm.lock`, inspect, and replace the committed
+   `requirements.lock` with that file. Preserves in-flight paper numerics.
+   Procedure documented in the new runbook section.
+
+### Out of scope (deferred)
+Several entries in `requirements.txt` may be unused (`xgboost`,
+`scikit-learn`, `scipy`, `joblib`, `apscheduler`, `seaborn`, `colorlog`,
+`click`, `requests`, `websockets`, `fastparquet`, `python-binance`,
+`aiohttp`). Kept verbatim in this PR so it is purely a pin operation; a
+follow-up cleanup PR should audit and remove them so the lock surface
+shrinks.
+
+---
+
 ## [Unreleased] — Telegram visibility for Phase D / Liq Sweep short setups
 
 ### Added — surface the new short-side edges in Telegram reports

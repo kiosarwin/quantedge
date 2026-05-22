@@ -41,11 +41,99 @@ warp-cli --accept-tos connect
 
 ```bash
 cd /home/arwin/ninja_trader
-python3 -m venv venv
+python3.11 -m venv venv
 source venv/bin/activate
-pip install -r requirements.txt
-pip install httpx          # Telegram notifications
+pip install --upgrade pip
+pip install -r requirements.lock                          # runtime
+pip install -r requirements.lock -r requirements-dev.txt  # + tests (CI)
 ```
+
+---
+
+## Pinned dependencies
+
+The bot ships **two** dependency files:
+
+| File | Purpose | Edited by |
+|---|---|---|
+| `requirements.txt` | Human-edited list of direct deps | Engineer (when adding/removing a dep) |
+| `requirements.lock` | Full transitive pin (runtime source of truth) | Generated from a clean Python 3.11 venv |
+| `requirements-dev.txt` | Dev-only deps (`pytest`) | Engineer |
+| `.python-version` | Pins baseline interpreter to `3.11` | Engineer |
+
+### Why pinning matters
+
+Risk math, EV gate, and ML soft gate all depend on numerical libraries
+(`numpy`, `pandas`, `scikit-learn`, `xgboost`, `ccxt`). A silent minor-version
+bump in `sklearn` or `xgboost` can shift `predict_proba` outputs and change
+which setups pass the gate — **without any test or log surfacing it**. The
+lock file makes installs reproducible across CI / dev / paper VM / live VM.
+
+### Install workflow (any environment)
+
+```bash
+python3.11 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.lock                          # runtime
+pip install -r requirements.lock -r requirements-dev.txt  # + tests
+```
+
+**Never** `pip install -r requirements.txt` for paper or live runs — that
+file is the editable list, not the lock.
+
+### Regenerating the lock (when adding/removing a dep)
+
+```bash
+# 1. Edit requirements.txt
+# 2. Regenerate lock from a clean venv:
+python3.11 -m venv /tmp/lockenv
+/tmp/lockenv/bin/pip install --upgrade pip wheel
+/tmp/lockenv/bin/pip install -r requirements.txt
+/tmp/lockenv/bin/pip freeze | sort -f > requirements.lock
+# 3. Commit BOTH requirements.txt and requirements.lock together.
+```
+
+If `uv` is available, the equivalent one-liner is:
+
+```bash
+uv pip compile requirements.txt --python-version 3.11 -o requirements.lock
+```
+
+### Lock-as-upgrade discipline
+
+Treat **every** lock change as a deliberate dependency upgrade. After
+regenerating:
+
+1. Run the full test suite from a venv built off the new lock:
+   ```bash
+   pytest tests/ -q
+   ```
+2. If any math-relevant lib (`numpy` / `pandas` / `scipy` / `scikit-learn` /
+   `xgboost` / `ccxt`) bumped its minor version, **re-run paper validation
+   from a fresh state** before promoting to live. Numerical drift can shift
+   EV / pwin / regime classification outputs without breaking tests.
+3. Review the diff in `requirements.lock`; if any package jumps a major
+   version, evaluate the changelog before merging.
+
+### VM alignment procedure
+
+If the live / paper VM is already running and you want to align it to the
+committed lock without disrupting in-flight numerics:
+
+```bash
+# On the running VM:
+source venv/bin/activate
+pip freeze | sort -f > vm.lock
+diff -u requirements.lock vm.lock
+```
+
+- If `diff` is empty: VM and lock match, redeploy is safe.
+- If `diff` shows math-lib version drift: capture `vm.lock` as the new
+  committed lock (preserves in-flight paper sample numerics) and re-run
+  paper validation from the next reset boundary.
+- If `diff` shows only patch-version drift on non-math libs: align the VM
+  with `pip install --force-reinstall -r requirements.lock`.
 
 ---
 
