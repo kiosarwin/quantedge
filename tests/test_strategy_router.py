@@ -63,14 +63,15 @@ def test_strategy_router_allows_short_reversal_only_when_conditions_match():
     assert decision.reason.startswith("short reversal sleeve")
 
 
-def test_strategy_router_blocks_short_trend_following():
+def test_strategy_router_allows_short_trend_following():
+    """UPGRADED: Short trend-following is now valid per Jegadeesh & Titman momentum research."""
     router = StrategyRouter(_cfg())
     decision = router.evaluate(
         _breakdown(direction="short", regime="trending_expansion", sm_phase="neutral", sm_bias="short"),
         DispersionState(value=0.0, state="normal"),
     )
-    assert decision.sleeve == "neutral"
-    assert "short side restricted" in decision.reason
+    assert decision.sleeve == "trend_following"
+    assert "trend sleeve" in decision.reason
 
 
 def test_strategy_router_blocks_trend_when_funding_is_extreme_against_direction():

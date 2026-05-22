@@ -155,3 +155,94 @@ def volatility_score(df: pd.DataFrame, cfg: dict) -> float:
         return round(atr_pct / 0.5 * 100, 2)
     # > 3%: decay
     return round(max(0.0, 100 - (atr_pct - 3.0) * 20), 2)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  VWAP (Volume Weighted Average Price)
+#  Ref: Zarattini & Aziz (2023, SSRN:4631351)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def vwap(df: pd.DataFrame, period: int = 20) -> float:
+    """Rolling VWAP over `period` bars. Directional bias: long above, short below."""
+    tp = (df["high"] + df["low"] + df["close"]) / 3
+    cum_tp_vol = (tp * df["volume"]).rolling(period).sum()
+    cum_vol = df["volume"].rolling(period).sum()
+    vwap_series = cum_tp_vol / cum_vol.replace(0, np.nan)
+    val = vwap_series.iloc[-1]
+    return float(val) if pd.notna(val) else float(df["close"].iloc[-1])
+
+
+def vwap_distance_pct(df: pd.DataFrame, period: int = 20) -> float:
+    """Distance of current price from VWAP as percentage. Positive = above VWAP."""
+    v = vwap(df, period)
+    price = float(df["close"].iloc[-1])
+    if v == 0:
+        return 0.0
+    return (price - v) / v * 100
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Volatility-Managed Momentum
+#  Ref: Moreira & Muir (2017) "Volatility-Managed Portfolios", Journal of Finance
+#  + Springer (2025) "Cryptocurrency momentum has (not) its moments"
+# ──────────────────────────────────────────────────────────────────────────────
+
+def volatility_managed_momentum(df: pd.DataFrame, cfg: dict) -> float:
+    """
+    Returns momentum score scaled inversely by realized volatility.
+    When vol is low, momentum signal is amplified; when vol is high, dampened.
+    Score: -100 to +100 (directional).
+    """
+    ind = cfg.get("indicators", {})
+    ema_fast = ind.get("ema_fast", 21)
+    ema_slow = ind.get("ema_slow", 55)
+    atr_period = ind.get("atr_period", 14)
+
+    if len(df) < max(ema_slow, atr_period * 2) + 5:
+        return 0.0
+
+    price = float(df["close"].iloc[-1])
+    ema_f = float(ema(df["close"], ema_fast).iloc[-1])
+    ema_s = float(ema(df["close"], ema_slow).iloc[-1])
+
+    # Raw momentum: signed EMA separation
+    if price == 0:
+        return 0.0
+    raw_momentum = (ema_f - ema_s) / price * 100  # as percentage
+
+    # Volatility scalar: target_vol / realized_vol (clamped 0.5-2.0)
+    current_atr_val = atr(df, atr_period)
+    atr_pct = current_atr_val / price * 100
+    target_vol = 1.5  # target ATR % (moderate vol)
+    vol_scalar = min(2.0, max(0.5, target_vol / max(0.1, atr_pct)))
+
+    # Scale momentum by inverse vol
+    managed = raw_momentum * vol_scalar * 50  # scale to -100..+100 range
+    return float(np.clip(managed, -100, 100))
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  ADX (Average Directional Index)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def adx_value(df: pd.DataFrame, period: int = 14) -> float:
+    """Compute ADX value. Delegates to regime module but provides standalone."""
+    try:
+        from src.analysis.regime import adx as _adx
+        return _adx(df, period)
+    except Exception:
+        return 25.0  # neutral fallback
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Sell Volume Ratio
+# ──────────────────────────────────────────────────────────────────────────────
+
+def sell_volume_ratio(df: pd.DataFrame, lookback: int = 20) -> float:
+    """Sell-side pressure: candles where close < open as fraction of total volume."""
+    recent = df.iloc[-lookback:]
+    sell_vol = recent.loc[recent["close"] < recent["open"], "volume"].sum()
+    total_vol = recent["volume"].sum()
+    if total_vol == 0:
+        return 0.5
+    return float(sell_vol / total_vol)

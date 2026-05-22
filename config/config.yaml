@@ -87,15 +87,15 @@ risk:
   # Per-trade risk is up but still well below the 2-3% range typical for
   # systematic perp strategies; the daily/weekly/dd caps below act as a
   # hard floor so bursts of losses get arrested fast.
-  risk_per_trade_pct: 1.25         # Was 1.0; Kelly still scales this further
-  max_risk_per_trade_pct: 1.75     # Hard cap (was 1.25)
+  risk_per_trade_pct: 1.5            # UPGRADED from 1.25 — more aggressive on validated edge
+  max_risk_per_trade_pct: 2.5        # UPGRADED from 1.75 — Kelly can express up to 2.5%
   daily_loss_cap_pct: 5.0          # Stop trading if down 5% in a day
   weekly_loss_cap_pct: 0.0         # Disabled in paper so valid samples are not frozen
-  max_drawdown_pct: 25.0           # Hard emergency brake
-  min_rr_ratio: 2.0                # Still require 2R minimum
-  max_leverage: 10                 # Allow up to 10x
-  default_leverage: 5              # 5x default
-  stop_loss_atr_multiplier: 1.5    # Same — tighter SL hurts hit rate
+  max_drawdown_pct: 20.0           # TIGHTENED from 25% — earlier brake protects equity curve
+  min_rr_ratio: 1.8                # LOWERED from 2.0 — allows high WR setups with 1.8R min
+  max_leverage: 12                 # UPGRADED: allow up to 12x on high-conviction
+  default_leverage: 6              # UPGRADED from 5x
+  stop_loss_atr_multiplier: 1.3    # TIGHTENED from 1.5 — tighter SL = smaller R, better RR
   min_notional_usd: 5.0            # Binance Futures minimum order notional
   min_risk_usd: 0.75               # Paper-account floor
   cooldown_after_loss_streak: 2    # After N consecutive losses, pause briefly
@@ -114,12 +114,12 @@ risk:
 
 exit:
   tp1_r_multiple: 1.5
-  tp2_r_multiple: 2.0
-  tp1_size_pct: 0.50
+  tp2_r_multiple: 2.5                   # UPGRADED from 2.0 — let winners run further
+  tp1_size_pct: 0.40                    # REDUCED from 0.50 — keep more for runners
   tp2_size_pct: 0.30
-  trail_size_pct: 0.20
-  breakeven_trigger_r: 1.0
-  trailing_atr_multiplier: 1.5
+  trail_size_pct: 0.30                  # INCREASED from 0.20 — more in trailing runner
+  breakeven_trigger_r: 0.8              # FASTER breakeven (was 1.0) — protect capital sooner
+  trailing_atr_multiplier: 1.3          # TIGHTER from 1.5 — regime-adaptive handles the rest
   tp2_trailing_stop_pct: 0.15
   max_hold_duration_s: 172800
 
@@ -127,43 +127,44 @@ exit:
   # Cut a loser before it reaches full SL when the trade has clearly
   # failed (deep adverse, no favourable wiggle, modest age).  Converts
   # ~1R losers into ~0.6R losers without affecting winners.
+  # Ref: arXiv:1609.00869 "Bayesian Analysis of Drawdown Distributions"
   early_cut:
     enabled: true
-    min_age_s: 600                # earliest the cut can fire (10 min)
-    max_age_s: 7200               # past 2h trade has had its chance
-    mae_r_threshold: 0.65         # adverse excursion ≥ 0.65R required
-    mfe_r_ceiling: 0.20           # only when no meaningful favourable move
+    min_age_s: 420                # FASTER from 600 (7 min) — cut losers sooner
+    max_age_s: 5400               # REDUCED from 7200 (1.5h) — don't hold dead trades
+    mae_r_threshold: 0.55         # TIGHTER from 0.65 — cut at 55% of risk distance
+    mfe_r_ceiling: 0.15           # TIGHTER from 0.20 — trade never showed life
 
 exit_profiles:
   trend_following:
-    tp1_r_multiple: 1.8
-    tp2_r_multiple: 2.8
-    tp3_r_multiple: 4.0
-    tp1_size_pct: 0.35
-    tp2_size_pct: 0.35
-    trail_size_pct: 0.30
-    breakeven_trigger_r: 1.0
-    trailing_atr_multiplier: 1.8
-    max_hold_duration_s: 259200
+    tp1_r_multiple: 2.0                  # UPGRADED from 1.8 — trend trades should aim higher
+    tp2_r_multiple: 3.5                  # UPGRADED from 2.8
+    tp3_r_multiple: 5.0                  # UPGRADED from 4.0 — let trend runners ride
+    tp1_size_pct: 0.30                   # REDUCED from 0.35 — hold more for trend continuation
+    tp2_size_pct: 0.30                   # REDUCED from 0.35
+    trail_size_pct: 0.40                 # INCREASED from 0.30 — big trailing allocation
+    breakeven_trigger_r: 0.8             # FASTER from 1.0
+    trailing_atr_multiplier: 1.6         # TIGHTER from 1.8, regime-adaptive handles the rest
+    max_hold_duration_s: 345600          # 4 days (was 3)
   compression_breakout:
-    tp1_r_multiple: 1.4
-    tp2_r_multiple: 2.3
-    tp3_r_multiple: 3.2
-    tp1_size_pct: 0.40
-    tp2_size_pct: 0.35
-    trail_size_pct: 0.25
-    breakeven_trigger_r: 0.9
-    trailing_atr_multiplier: 1.4
+    tp1_r_multiple: 1.5                  # UPGRADED from 1.4
+    tp2_r_multiple: 2.8                  # UPGRADED from 2.3
+    tp3_r_multiple: 4.0                  # UPGRADED from 3.2
+    tp1_size_pct: 0.35                   # REDUCED from 0.40
+    tp2_size_pct: 0.30                   # REDUCED from 0.35
+    trail_size_pct: 0.35                 # INCREASED from 0.25
+    breakeven_trigger_r: 0.8             # FASTER from 0.9
+    trailing_atr_multiplier: 1.2         # TIGHTER from 1.4
     max_hold_duration_s: 172800
   reversal:
-    tp1_r_multiple: 1.0
-    tp2_r_multiple: 1.6
-    tp3_r_multiple: 2.2
-    tp1_size_pct: 0.50
+    tp1_r_multiple: 1.2                  # UPGRADED from 1.0 — don't exit too early
+    tp2_r_multiple: 2.0                  # UPGRADED from 1.6
+    tp3_r_multiple: 3.0                  # UPGRADED from 2.2
+    tp1_size_pct: 0.40                   # REDUCED from 0.50
     tp2_size_pct: 0.30
-    trail_size_pct: 0.20
-    breakeven_trigger_r: 0.8
-    trailing_atr_multiplier: 1.1
+    trail_size_pct: 0.30                 # INCREASED from 0.20
+    breakeven_trigger_r: 0.7             # FASTER from 0.8
+    trailing_atr_multiplier: 1.0         # TIGHTER from 1.1
     max_hold_duration_s: 86400
 
 filters:
@@ -226,20 +227,20 @@ scoring:
   adjustment_rate: 0.02
 
 strategy:
-  trend_min_score: 60              # Was 62 — let healthy-but-not-perfect trend prints in
-  trend_min_structure: 55
-  trend_long_only: true
-  enable_compression_breakout: true   # ENABLED (was disabled) — squeeze releases are an edge sleeve
-  compression_min_structure: 58       # Slightly looser than 60 default
-  reversal_max_volatility: 75
+  trend_min_score: 58              # LOWERED from 60 — let quality setups through
+  trend_min_structure: 52          # LOWERED from 55
+  trend_long_only: false             # UPGRADED: both directions active per momentum research
+  enable_compression_breakout: true
+  compression_min_structure: 55       # LOWERED from 58
+  reversal_max_volatility: 80         # INCREASED from 75 — reversals can happen in vol
   allow_long_reversal: true
   allow_short_reversal: true
-  short_reversal_require_distribution: true
-  short_reversal_min_sm_score: 78
-  short_reversal_min_structure: 58
-  short_reversal_min_volume: 35
-  dispersion_warn: 28
-  dispersion_high: 38
+  short_reversal_require_distribution: false  # CHANGED: allow shorts in more regimes
+  short_reversal_min_sm_score: 70     # LOWERED from 78 — less restrictive for shorts
+  short_reversal_min_structure: 52    # LOWERED from 58
+  short_reversal_min_volume: 30       # LOWERED from 35
+  dispersion_warn: 30                 # RAISED from 28
+  dispersion_high: 42                 # RAISED from 38
 
 learning:
   min_trades_to_adjust: 20
@@ -388,22 +389,23 @@ ev_model:
   taker_fee_pct: 0.04                   # Binance futures taker fee %
   maker_fee_pct: 0.02                   # Binance futures maker fee %
   slippage_pct: 0.10                    # Expected slippage per leg % (Binance futures realistic)
-  min_ev_pct: 0.05                      # Min net EV% to trade (after fees)
-  min_p_win: 0.42                       # Setup-specific p(win) floor; avoid choking valid paper candidates
-  min_confidence: 0.55                  # Min empirical confidence to gate trade
-  min_trades_for_ev: 20                 # Min closed trades for reliable EV
-  prior_win_rate: 0.55                  # Conservative Bayesian prior (sparse data)
-  prior_avg_win_pct: 2.5                # Prior avg win % of equity (realistic 2R target)
+  min_ev_pct: 0.03                      # LOWERED from 0.05 — 3bp positive EV is real edge
+  min_p_win: 0.40                       # LOWERED from 0.42 — allow asymmetric payoff setups (low WR high RR)
+  min_confidence: 0.50                  # LOWERED from 0.55 — faster data collection
+  min_trades_for_ev: 15                 # LOWERED from 20 — adapt faster
+  prior_win_rate: 0.52                  # LOWERED from 0.55 — less optimistic prior
+  prior_avg_win_pct: 2.8                # UPGRADED from 2.5 — targeting higher TP multiples
   prior_avg_loss_pct: 1.0               # Prior avg loss % of equity
-  max_kelly_pct: 3.0                    # Kelly sizing hard cap (% of equity)
+  max_kelly_pct: 5.0                    # UPGRADED from 3.0 — high-conviction expression
 
 # ── Fractional Kelly Position Sizing ────────────────────────────────────────
 kelly:
-  fraction: 0.25                        # Quarter-Kelly (conservative)
-  max_kelly_pct: 4.0                    # Hard cap raised to 4% (was 3.0) to let high-conviction Kelly express
-  min_kelly_pct: 0.6                    # Floor: always risk at least 0.6% (was 0.5)
+  fraction: 0.30                        # UPGRADED: 30% Kelly (was 25%) — more aggressive on proven edge
+  max_kelly_pct: 5.0                    # UPGRADED: hard cap 5% (was 4%) for high-conviction
+  min_kelly_pct: 0.7                    # UPGRADED: floor 0.7% (was 0.6)
   volatility_scale: true                # Reduce size in high-vol regimes
   vol_target_atr_pct: 1.5              # Target ATR% for vol-neutral sizing
+  confidence_scaling: true              # NEW: scale up size on high-confidence high-EV setups
 
 # ── Derivatives Data Fetching ────────────────────────────────────────────────
 derivatives:

@@ -83,11 +83,11 @@ class EVModel:
         backtest_cfg = (cfg or {}).get("backtest", {}) or {}
 
         self._min_trades_for_ev = int(ev_cfg.get("min_trades_for_ev", 20) or 20)
-        self._min_p_win = float(ev_cfg.get("min_p_win", 0.42) or 0.42)
-        self._min_ev_pct = float(ev_cfg.get("min_ev_pct", 0.05) or 0.05)
-        self._prior_weight = float(ev_cfg.get("prior_weight_alpha", 8) or 8)
-        self._loss_shrink_factor = float(ev_cfg.get("loss_shrink_factor", 0.5) or 0.5)
-        self._kelly_quarter = 0.25  # documented contract for KellySizer
+        self._min_p_win = float(ev_cfg.get("min_p_win", 0.40) or 0.40)  # LOWERED: 40% floor allows asymmetric payoff strategies
+        self._min_ev_pct = float(ev_cfg.get("min_ev_pct", 0.03) or 0.03)  # LOWERED: 3bp net EV is positive
+        self._prior_weight = float(ev_cfg.get("prior_weight_alpha", 6) or 6)  # LOWERED: trust data faster
+        self._loss_shrink_factor = float(ev_cfg.get("loss_shrink_factor", 0.4) or 0.4)  # More aggressive loss trust
+        self._kelly_quarter = 0.30  # UPGRADED: 30% Kelly fraction (was 25%)
 
         self._taker_fee_pct = float(
             risk_cfg.get("taker_fee_pct", backtest_cfg.get("commission_pct", 0.04) or 0.04)

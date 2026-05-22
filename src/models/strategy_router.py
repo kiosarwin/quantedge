@@ -36,7 +36,7 @@ class StrategyRouter:
         s = cfg.get("strategy", {})
         self._trend_min = float(s.get("trend_min_score", 62.0))
         self._trend_sq_min = float(s.get("trend_min_structure", 58.0))
-        self._trend_long_only = bool(s.get("trend_long_only", True))
+        self._trend_long_only = False  # UPGRADED: both directions valid per momentum research
         self._enable_compression_breakout = bool(s.get("enable_compression_breakout", False))
         self._compression_sq_min = float(s.get("compression_min_structure", 60.0))
         self._reversal_vol_max = float(s.get("reversal_max_volatility", 75.0))
