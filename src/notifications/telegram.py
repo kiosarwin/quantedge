@@ -247,6 +247,77 @@ class TelegramNotifier:
                 lines.append(f"• `{label}` × {count}")
         return lines
 
+    @staticmethod
+    def _short_setup_label_pretty(label: str) -> str:
+        """Human-readable name for the dedicated short-setup detector."""
+        mapping = {
+            "phase_d": "PHASE D (Wyckoff SOW)",
+            "liq_sweep": "LIQ SWEEP (bear stop hunt)",
+        }
+        return mapping.get(str(label or "").strip().lower(), str(label or ""))
+
+    @staticmethod
+    def _short_setup_emoji(label: str) -> str:
+        mapping = {
+            "phase_d": "🪓",
+            "liq_sweep": "🩸",
+        }
+        return mapping.get(str(label or "").strip().lower(), "🎯")
+
+    @classmethod
+    def _render_short_setup_summary_block(cls, summary: dict | None) -> list[str]:
+        """Multi-line short-edge activity block for the cycle report.
+
+        Surfaces Phase D / Liq Sweep detections so the operator can see how
+        many post-distribution short edges the scanner saw in the universe
+        on this cycle. Returns ``[]`` when nothing fired so callers can
+        splice unconditionally without producing an empty section.
+        """
+        if not summary or not isinstance(summary, dict):
+            return []
+        total = int(summary.get("total") or 0)
+        if total <= 0:
+            return []
+
+        lines: list[str] = ["🎯 *Short Setup Activity:*"]
+        phase_d = int(summary.get("phase_d") or 0)
+        liq_sweep = int(summary.get("liq_sweep") or 0)
+
+        parts: list[str] = []
+        if phase_d > 0:
+            parts.append(f"`PHASE_D × {phase_d}`")
+        if liq_sweep > 0:
+            parts.append(f"`LIQ_SWEEP × {liq_sweep}`")
+        if parts:
+            lines.append("• " + " · ".join(parts))
+
+        for entry in (summary.get("top") or [])[:3]:
+            sym = str(entry.get("symbol", "?")).split(":")[0].replace("/", "")
+            label = str(entry.get("label", "") or "")
+            conf = float(entry.get("confidence") or 0.0)
+            emoji = cls._short_setup_emoji(label)
+            lines.append(f"  {emoji} `{sym}` — {label} (conf `{conf:.2f}`)")
+        return lines
+
+    @classmethod
+    def _render_short_setup_compact(cls, summary: dict | None) -> str:
+        """One-line condensed short-edge tally for the heartbeat."""
+        if not summary or not isinstance(summary, dict):
+            return ""
+        total = int(summary.get("total") or 0)
+        if total <= 0:
+            return ""
+        phase_d = int(summary.get("phase_d") or 0)
+        liq_sweep = int(summary.get("liq_sweep") or 0)
+        parts: list[str] = []
+        if phase_d > 0:
+            parts.append(f"PHASE_D `{phase_d}`")
+        if liq_sweep > 0:
+            parts.append(f"LIQ_SWEEP `{liq_sweep}`")
+        if not parts:
+            return ""
+        return "🎯 Short edges: " + " · ".join(parts)
+
     async def trade_opened(
         self,
         bd: "SignalBreakdown",
@@ -269,6 +340,27 @@ class TelegramNotifier:
         sm_line = ""
         if bd.smart_money:
             sm_line = f"\n🧠 Smart Money: `{bd.smart_money.phase.value}`"
+
+        # Phase D / Liq Sweep dedicated short edge — only render when the
+        # detector actually fired; long trades just skip this block.
+        short_setup_line = ""
+        ss = getattr(bd, "short_setup", None)
+        if ss is not None and getattr(ss, "is_valid", False):
+            ss_label = str(getattr(ss, "label", "") or "").strip()
+            ss_conf = float(getattr(ss, "confidence", 0.0) or 0.0)
+            ss_notes = str(getattr(ss, "notes", "") or "").strip()
+            ss_pretty = self._short_setup_label_pretty(ss_label) or ss_label
+            ss_emoji = self._short_setup_emoji(ss_label)
+            short_setup_line = (
+                f"\n{ss_emoji} *Short Setup:* `{ss_pretty}`  conf `{ss_conf:.2f}`"
+            )
+            if ss_notes:
+                # Notes are a "|"-joined reason string from the detector;
+                # collapse to a single line (Telegram Markdown is finicky).
+                ss_notes_clean = ss_notes.replace("\n", " ").replace("`", "'")
+                if len(ss_notes_clean) > 110:
+                    ss_notes_clean = ss_notes_clean[:107] + "..."
+                short_setup_line += f"\n   _{ss_notes_clean}_"
 
         edge_line = ""
         edge = getattr(bd, "edge_result", None)
@@ -302,6 +394,7 @@ class TelegramNotifier:
             f"💼 Risk: `{setup.risk_pct:.2f}%`  (${risk_usd:.2f} at risk)  |  Position: `${setup.size_usd:,.2f}`"
             f"{ev_line}"
             f"{sm_line}"
+            f"{short_setup_line}"
             f"{edge_line}"
             f"{jim_line}\n"
             f"🧮 _Jim placed this trade. — The model never sleeps._ 🥷"
@@ -317,6 +410,8 @@ class TelegramNotifier:
         reason: str,
         entry: float,
         exit_price: float,
+        short_setup_label: str = "",
+        short_setup_confidence: float = 0.0,
     ) -> None:
         if not self._enabled:
             return
@@ -344,12 +439,27 @@ class TelegramNotifier:
                 headline = f"❌ *Boss, this one didn't work out — {sym}.*"
                 closer   = "📋 Logging it. Jim's model is learning from this. Won't repeat. 🧮"
 
+        # Phase D / Liq Sweep label — only render when the trade was admitted
+        # via the dedicated detector. Tag is purely diagnostic; routing is
+        # already settled at this point.
+        ss_line = ""
+        ss_label = str(short_setup_label or "").strip().lower()
+        if ss_label and ss_label != "none":
+            pretty = self._short_setup_label_pretty(ss_label) or ss_label
+            emoji = self._short_setup_emoji(ss_label)
+            conf = float(short_setup_confidence or 0.0)
+            if conf > 0:
+                ss_line = f"\nSetup: {emoji} `{pretty}` (conf `{conf:.2f}`)"
+            else:
+                ss_line = f"\nSetup: {emoji} `{pretty}`"
+
         reason_clean = reason.replace("_", " ")
         msg = (
             f"{headline}\n"
             f"══════════════════════\n"
             f"Direction: `{direction.upper()}`  |  Exit: `{reason_clean}`\n"
-            f"Entry: `${entry:,.4f}` → Exit: `${exit_price:,.4f}`\n"
+            f"Entry: `${entry:,.4f}` → Exit: `${exit_price:,.4f}`"
+            f"{ss_line}\n"
             f"──────────────────────\n"
             f"P&L: *{sign}${pnl_usd:.2f}* ({sign}{pnl_pct:.2f}% of equity)\n"
             f"──────────────────────\n"
@@ -417,6 +527,7 @@ class TelegramNotifier:
         floating_positions: list[dict] | None = None,
         open_positions: list[dict] | None = None,
         risk_budget: dict | None = None,
+        short_setup_summary: dict | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -437,6 +548,9 @@ class TelegramNotifier:
             f"Top: {top_line}",
         ]
         msg_lines.extend(self._render_risk_budget_compact(risk_budget))
+        ss_line = self._render_short_setup_compact(short_setup_summary)
+        if ss_line:
+            msg_lines.append(ss_line)
         await self._send("\n".join(msg_lines))
 
     async def cycle_report(
@@ -469,6 +583,7 @@ class TelegramNotifier:
         bootstrap_audit: list[str] | None = None,
         risk_budget: dict | None = None,
         rejection_summary: dict | None = None,
+        short_setup_summary: dict | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -629,12 +744,22 @@ class TelegramNotifier:
                 size_usd = self._safe_float(p.get("size_usd", 0.0))
                 strategy = p.get("strategy_sleeve", "neutral")
                 exit_profile = p.get("exit_profile", "default")
+                ss_label = str(p.get("short_setup_label", "") or "").strip().lower()
+                ss_conf = self._safe_float(p.get("short_setup_confidence", 0.0))
+                ss_tag = ""
+                if ss_label and ss_label != "none":
+                    ss_emoji = self._short_setup_emoji(ss_label)
+                    if ss_conf > 0:
+                        ss_tag = f"\n  {ss_emoji} Short Setup `{ss_label}` (conf `{ss_conf:.2f}`)"
+                    else:
+                        ss_tag = f"\n  {ss_emoji} Short Setup `{ss_label}`"
                 lines.append(
                     f"{color} {d_emoji} `{sym}` {direction.upper() or 'UNKNOWN'}\n"
                     f"  ${entry:,.4f} → ${current:,.4f}  "
                     f"({sign}{pnl_pct:+.2f}%)  {sign}${pnl_usd:.2f}  |  {elapsed_m}m\n"
                     f"  SL `${sl:,.4f}`  TP1 `${tp1:,.4f}`  Size `${size_usd:,.2f}`\n"
                     f"  Strategy `{strategy}`  Exit `{exit_profile}`  Risk `{risk_pct:.2f}%` (${risk_usd:.2f})"
+                    f"{ss_tag}"
                 )
             float_sign = "+" if total_float >= 0 else ""
             float_color = "🟢" if total_float >= 0 else "🔴"
@@ -727,8 +852,14 @@ class TelegramNotifier:
             else:
                 box = "🟥"
                 flag = ""
+            ss = getattr(b, "short_setup", None)
+            ss_tag = ""
+            if ss is not None and getattr(ss, "is_valid", False):
+                ss_label = str(getattr(ss, "label", "") or "").strip().lower()
+                if ss_label and ss_label != "none":
+                    ss_tag = f"  {self._short_setup_emoji(ss_label)}`{ss_label}`"
             lines.append(
-                f"{box} {d_arrow} `{sym}` {score_str} | {regime_short} | {gates}{flag}  {ev_str}"
+                f"{box} {d_arrow} `{sym}` {score_str} | {regime_short} | {gates}{flag}{ss_tag}  {ev_str}"
             )
         if fire_count == 0:
             lines.append(f"_No signals above threshold yet — waiting for setup._")
@@ -739,6 +870,12 @@ class TelegramNotifier:
         if rej_lines:
             lines.append(f"──────────────────────")
             lines.extend(rej_lines)
+
+        # ── Short Setup Activity (Phase D / Liq Sweep) ─────────────
+        ss_lines = self._render_short_setup_summary_block(short_setup_summary)
+        if ss_lines:
+            lines.append(f"──────────────────────")
+            lines.extend(ss_lines)
 
         # ── Roadmap ───────────────────────────────────────────────────
         lines.append(f"──────────────────────")

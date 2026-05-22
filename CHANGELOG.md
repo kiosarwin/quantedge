@@ -4,6 +4,71 @@
 
 ---
 
+## [Unreleased] — Telegram visibility for Phase D / Liq Sweep short setups
+
+### Added — surface the new short-side edges in Telegram reports
+- `TradeSetup` carries two new fields, `short_setup_label` and
+  `short_setup_confidence`, populated at trade-open from the
+  `SignalBreakdown.short_setup` produced by the dedicated detector. The
+  fields persist across bot restart through the existing
+  `_serialize_trade` / `_deserialize_trade` flow (defaults wired in
+  `_deserialize_trade` so older `data/open_trades.json` payloads still
+  load cleanly).
+- `RiskManager.calculate_setup` accepts `short_setup_label` /
+  `short_setup_confidence` kwargs and forwards them onto the returned
+  `TradeSetup`. Long trades / shorts without a dedicated detector pass
+  empty defaults.
+- `_pending_scores` records the same metadata so attribution / dataset
+  logger / cohort policy can read the label after close.
+- `_telegram_open_positions()` exposes the label/confidence so cycle
+  reports tag every active short with the edge that admitted it.
+
+### Telegram surfaces updated
+- `trade_opened`: explicit `🪓 PHASE D` / `🩸 LIQ SWEEP` line with the
+  detector confidence and the underlying notes (e.g.
+  `BREAK_SUPPORT|VOL_SPIKE(2.50x)|BEAR_CLOSE`). Long trades and shorts
+  without a dedicated detector skip the block entirely.
+- `trade_closed`: appends a single `Setup: 🪓 PHASE D (conf 0.84)` line
+  to the close card so the operator can see *which* edge fired without
+  cross-referencing the open card.
+- `heartbeat`: optional `short_setup_summary` kwarg renders a one-line
+  `🎯 Short edges: PHASE_D 2 · LIQ_SWEEP 1` tally beneath the risk
+  budget. Suppressed when zero so it never adds heartbeat noise.
+- `cycle_report`:
+  - per-position rows tag the active edge as
+    `🪓 Short Setup phase_d (conf 0.85)`
+  - top-5 scan-result rows append a small `🪓phase_d` /  `🩸liq_sweep`
+    badge so the operator sees what fired in real time
+  - new `🎯 Short Setup Activity` block summarising counts per detector
+    and the top-3 highest-confidence symbols on this scan
+
+### main.py
+- New `NinjaTrader._short_setup_summary(breakdowns)` static helper that
+  walks the per-cycle scan and emits the dict consumed by both the
+  cycle report and the heartbeat. Skips invalid signals so the count
+  always matches the StrategyRouter admission gate.
+- Cycle-report and heartbeat calls now pass the summary through.
+
+### Tests
+- `tests/test_telegram_short_setups.py` (12 cases): `trade_opened`
+  renders the right label/notes for Phase D and Liq Sweep, suppresses
+  the block for longs and invalid setups; `trade_closed` includes /
+  omits the tag correctly; `heartbeat` renders / suppresses the compact
+  tally; `cycle_report` tags open positions, scan rows, and renders the
+  summary block when present.
+- `tests/test_short_setup_summary.py` (4 cases): the helper counts
+  detectors, sorts the top-3 by confidence, caps at 3, and ignores
+  invalid / blank-label signals. Loaded via `ast` so the test does not
+  need to import the heavy `src.main` dependency chain.
+
+### Notes
+- Pure visibility change — no scoring / routing / sizing behaviour
+  changes. The dedicated short detectors and their admission path
+  (PR #8) are unchanged.
+- `Futures` repo is **not modified**.
+
+---
+
 ## [Unreleased] — short-side post-distribution edges (Phase D + Liq Sweep)
 
 ### Added — short setup detectors ported from `kiosarwin/Futures`

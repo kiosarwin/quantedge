@@ -451,6 +451,8 @@ class TradeManager:
                 "breakeven_trigger_r": 1.0,
                 "trailing_atr_multiplier": 1.5,
                 "max_hold_duration_s": 172800,
+                "short_setup_label": "",
+                "short_setup_confidence": 0.0,
             }
             for key, value in defaults.items():
                 if key not in setup_payload:

@@ -702,6 +702,7 @@ class NinjaTrader:
                         floating_positions=_floating,
                         open_positions=self._telegram_open_positions(),
                         risk_budget=self._build_risk_budget(),
+                        short_setup_summary=self._short_setup_summary(breakdowns),
                     )
                 # ── Monitor open trades ───────────────────────────────────
                 if self._shadow:
@@ -1171,6 +1172,17 @@ class NinjaTrader:
                         log.info("[%s] Jim scale=%.2fx  (%s)", bd.symbol, total_scale, ", ".join(all_notes))
 
                     _live = self._trading["mode"] == "live"
+                    _short_setup = getattr(bd, "short_setup", None)
+                    _short_setup_label = (
+                        getattr(_short_setup, "label", "")
+                        if _short_setup is not None and getattr(_short_setup, "is_valid", False)
+                        else ""
+                    )
+                    _short_setup_confidence = (
+                        float(getattr(_short_setup, "confidence", 0.0))
+                        if _short_setup is not None and getattr(_short_setup, "is_valid", False)
+                        else 0.0
+                    )
                     setup = self._risk.calculate_setup(
                         bd.symbol, bd.direction, df, snap.last_price,
                         strategy_sleeve=bd.strategy_sleeve,
@@ -1178,6 +1190,8 @@ class NinjaTrader:
                         kelly_scale=total_scale,
                         min_lot_size=self._client.min_lot_size(bd.symbol) if _live else 0.0,
                         min_notional_usd=self._client.min_notional(bd.symbol) if _live else 0.0,
+                        short_setup_label=_short_setup_label,
+                        short_setup_confidence=_short_setup_confidence,
                     )
                     if setup is None:
                         setup_reason = (
@@ -1283,6 +1297,10 @@ class NinjaTrader:
                         "trend_bucket": ("weak" if bd.trend_strength < 40 else "moderate" if bd.trend_strength < 65 else "strong" if bd.trend_strength < 85 else "very_strong"),
                         "cohort_key": getattr(bd, "cohort_key", ""),
                         "lifecycle_status": getattr(bd, "lifecycle_status", "RESEARCH"),
+                        # Phase D / Liq Sweep dedicated short-setup metadata
+                        # (empty when the trade did not fire a dedicated detector).
+                        "short_setup_label": _short_setup_label,
+                        "short_setup_confidence": _short_setup_confidence,
                     }
                     # CRITICAL: only notify + record if trade actually opened
                     opened = await self._trade_mgr.open(setup)
@@ -1571,6 +1589,16 @@ class NinjaTrader:
             reason=reason,
             entry=entry_p,
             exit_price=close_p,
+            short_setup_label=str(
+                getattr(trade.setup, "short_setup_label", "")
+                or scores.get("short_setup_label", "")
+                or ""
+            ),
+            short_setup_confidence=float(
+                getattr(trade.setup, "short_setup_confidence", 0.0)
+                or scores.get("short_setup_confidence", 0.0)
+                or 0.0
+            ),
         )
 
     async def _on_trade_progress(self, trade: OpenTrade, event: str, price: float) -> None:
@@ -1765,6 +1793,53 @@ class NinjaTrader:
             log.warning("rejection summary failed: %s", exc)
             return {"total": 0, "stages": []}
 
+    @staticmethod
+    def _short_setup_summary(breakdowns: list) -> dict:
+        """Tally Phase D / Liq Sweep detections across the current scan.
+
+        Returns a dict consumed by ``TelegramNotifier.cycle_report`` /
+        ``heartbeat`` to surface dedicated short-edge activity. The tally
+        only reflects valid (high-confidence) detections — the same gate
+        the StrategyRouter uses to admit the trade — so a high count here
+        means the bot saw real post-distribution breakdown opportunities
+        in the universe, not just noise.
+
+        Shape:
+            {
+                "total": int,           # total valid short_setup detections
+                "phase_d": int,
+                "liq_sweep": int,
+                "top": [
+                    {"symbol": str, "label": str, "confidence": float},
+                    ...
+                ],
+            }
+        """
+        out = {"total": 0, "phase_d": 0, "liq_sweep": 0, "top": []}
+        if not breakdowns:
+            return out
+        rows: list[tuple[str, str, float]] = []
+        for bd in breakdowns:
+            setup = getattr(bd, "short_setup", None)
+            if setup is None or not getattr(setup, "is_valid", False):
+                continue
+            label = str(getattr(setup, "label", "") or "")
+            if not label or label == "none":
+                continue
+            confidence = float(getattr(setup, "confidence", 0.0) or 0.0)
+            out["total"] += 1
+            if label == "phase_d":
+                out["phase_d"] += 1
+            elif label == "liq_sweep":
+                out["liq_sweep"] += 1
+            rows.append((str(getattr(bd, "symbol", "?")), label, confidence))
+        rows.sort(key=lambda r: r[2], reverse=True)
+        out["top"] = [
+            {"symbol": sym, "label": lab, "confidence": conf}
+            for sym, lab, conf in rows[:3]
+        ]
+        return out
+
     async def _maybe_send_fund_manager_report(
         self,
         breakdowns: list[SignalBreakdown],
@@ -1826,6 +1901,7 @@ class NinjaTrader:
             jim_bonus=self._fund_mgr.bonus,
             risk_budget=self._build_risk_budget(),
             rejection_summary=self._rejection_summary(top_n=3, reset=True),
+            short_setup_summary=self._short_setup_summary(breakdowns),
         )
 
     async def _maybe_send_equity_graph_report(self, cycle_num: int = 0) -> None:
@@ -2086,6 +2162,10 @@ class NinjaTrader:
                 "opened_at": trade.opened_at,
                 "strategy_sleeve": getattr(trade.setup, "strategy_sleeve", "neutral"),
                 "exit_profile": getattr(trade.setup, "exit_profile", "default"),
+                # Phase D / Liq Sweep dedicated edge metadata — empty when
+                # the trade did not fire a dedicated short setup.
+                "short_setup_label": str(getattr(trade.setup, "short_setup_label", "") or ""),
+                "short_setup_confidence": float(getattr(trade.setup, "short_setup_confidence", 0.0) or 0.0),
             })
         return open_trades
 

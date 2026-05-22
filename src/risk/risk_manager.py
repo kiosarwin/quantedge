@@ -43,6 +43,13 @@ class TradeSetup:
     breakeven_trigger_r: float = 1.0
     trailing_atr_multiplier: float = 1.5
     max_hold_duration_s: int = 172800
+    # Dedicated short-setup label and confidence (Phase D / Liq Sweep) so
+    # downstream surfaces (Telegram, dataset_logger, attribution) can
+    # report which post-distribution edge fired. Empty when no dedicated
+    # short setup was active. Defaults preserve backward compat for state
+    # loaded from older `data/open_trades.json`.
+    short_setup_label: str = ""
+    short_setup_confidence: float = 0.0
 
 
 @dataclass
@@ -191,6 +198,8 @@ class RiskManager:
         backtest: bool = False,
         min_lot_size: float = 0.0,
         min_notional_usd: float = 0.0,
+        short_setup_label: str = "",
+        short_setup_confidence: float = 0.0,
     ) -> TradeSetup | None:
         """
         Returns a fully computed TradeSetup or None if risk/reward insufficient.
@@ -389,6 +398,8 @@ class RiskManager:
             breakeven_trigger_r=float(exit_profile.get("breakeven_trigger_r", self._exit.get("breakeven_trigger_r", 1.0))),
             trailing_atr_multiplier=float(exit_profile.get("trailing_atr_multiplier", self._exit.get("trailing_atr_multiplier", 1.5))),
             max_hold_duration_s=int(exit_profile.get("max_hold_duration_s", self._exit.get("max_hold_duration_s", 172800))),
+            short_setup_label=str(short_setup_label or ""),
+            short_setup_confidence=float(short_setup_confidence or 0.0),
         )
 
     def _resolve_exit_profile(self, strategy_sleeve: str) -> tuple[str, dict]:
