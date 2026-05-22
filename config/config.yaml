@@ -299,6 +299,12 @@ safety:
   max_consecutive_losses: 0              # Disable hard streak stop in paper; rely on core strategy + sizing
   api_retry_attempts: 3
   api_retry_delay_seconds: 5
+  # Hang-storm protection (added 2026-05-22). Two-layer timeout on every
+  # Binance API call. Inner enforces aiohttp ClientTimeout; outer enforces
+  # asyncio.wait_for. Outer must be >= inner so ccxt surfaces its own
+  # TimeoutError before asyncio cancels the coroutine.
+  api_http_timeout_seconds: 12.0         # ccxt -> aiohttp ClientTimeout(total)
+  api_call_timeout_seconds: 15.0         # asyncio.wait_for ceiling per call
   heartbeat_interval_seconds: 30
   auto_live_on_readiness: false          # Manual promotion only after audited forward results
   min_live_balance_usd: 10.0             # Abort live transition if balance below this

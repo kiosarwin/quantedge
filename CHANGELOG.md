@@ -4,6 +4,75 @@
 
 ---
 
+## [Unreleased] — Hang-storm guard: hard timeouts on every Binance API call
+
+### Fixed — known issue from Live Status 2026-04-20
+The 2026-04-19 ~02:00 UTC hang storm was traced to ccxt async REST calls
+without a strictly enforced wallclock budget. Under flaky network
+conditions ccxt's own ``timeout`` could miss (rate-limiter deadlock,
+stuck aiohttp session pool), freezing whichever loop happened to be
+inside an exchange call. The bot kept the process alive but stopped
+making progress because every coroutine in the scan / heartbeat /
+executor pipeline was awaiting a never-resolving future.
+
+### Changed — `BinanceFuturesClient` two-layer timeout
+- **Inner** (`safety.api_http_timeout_seconds`, default 12.0s) — passed
+  to ccxt as ``timeout`` so aiohttp's ``ClientTimeout(total=...)`` is
+  set explicitly per HTTP request. No more relying on ccxt defaults.
+- **Outer** (`safety.api_call_timeout_seconds`, default 15.0s) — every
+  public async method now goes through a private ``_call`` wrapper that
+  enforces ``asyncio.wait_for``. This catches anything ccxt's own
+  timeout misses (rate-limiter wait, session-pool deadlock, dead
+  socket).
+- The wrapper auto-bumps the outer budget to ``inner + 3s`` if the
+  operator misconfigures it below the inner — otherwise we'd cancel
+  ccxt before it could surface its own ``TimeoutError`` cleanly.
+- ``TimeoutError`` raised by ``_call`` is a subclass of ``Exception``,
+  so existing per-call ``try/except`` blocks (``fetch_open_interest``,
+  ``set_margin_mode``, ``set_position_mode_one_way``,
+  ``fetch_long_short_ratio``, ``fetch_taker_buy_ratio``) keep their
+  existing tolerant behaviour. ``fetch_ohlcv``'s ``tenacity`` retry
+  decorator also keeps working unchanged — each attempt now has its
+  own bounded budget.
+
+### Coverage
+Every async method that touches ``self._exchange`` is wrapped:
+``connect``, ``fetch_markets``, ``fetch_ohlcv``, ``fetch_ticker``,
+``fetch_tickers``, ``fetch_funding_rate``, ``fetch_open_interest``,
+``fetch_long_short_ratio``, ``fetch_taker_buy_ratio``,
+``fetch_order_book``, ``fetch_balance``, ``fetch_positions``,
+``fetch_open_orders``, ``set_leverage``, ``set_margin_mode``,
+``create_order``, ``cancel_order``, ``cancel_all_orders``,
+``fetch_order``, ``set_position_mode_one_way``. ``close()`` is the only
+exception — it's the cleanup path; if it hangs the caller is already
+shutting down. Callers that previously had their own ``wait_for``
+ceiling (``main.py::fetch_snapshots`` 180s, ``spot_context`` 2s) are
+unchanged — they remain in place as outer-outer safety nets.
+
+### Tests
+- ``tests/test_api_call_timeout.py`` — 26 cases covering: defaults,
+  operator overrides, auto-bump on misconfig, happy-path return,
+  hang→TimeoutError, non-timeout exception passthrough, **15
+  parametrised regression guards** (one per wrapped public method)
+  proving the outer budget is enforced regardless of the underlying
+  ccxt method, and 5 cases proving the tolerant-failure paths still
+  swallow timeouts (return neutral defaults rather than raising).
+- Suite total: **200 / 200 pass** on Python 3.11 (was 174 + 26 new).
+
+### Operator hooks
+```yaml
+safety:
+  api_http_timeout_seconds: 12.0   # ccxt -> aiohttp ClientTimeout(total)
+  api_call_timeout_seconds: 15.0   # asyncio.wait_for ceiling per call
+```
+
+Both have safe defaults, so existing deployments inherit the fix
+without touching `config.yaml`. Tune up if you see ``Binance API call
+'<label>' exceeded outer budget`` warnings in healthy networks; tune
+down if you want faster recovery from a flaky exchange.
+
+---
+
 ## [Unreleased] — Telegram visibility for Phase D / Liq Sweep short setups
 
 ### Added — surface the new short-side edges in Telegram reports
@@ -314,4 +383,4 @@
 - **Dataset rows**: 1,939 (6 closed trades, 1,933 near-misses)
 - **Phase**: 1 of 3 — 14 more closed trades needed to unlock ML
 - **Watchdog**: Healthy, ~9h uptime, 291MB mem
-- **Known issue**: Hang storm on 2026-04-19 ~02:00 UTC — suspected Binance API call with no timeout; not yet fixed
+- **Known issue**: Hang storm on 2026-04-19 ~02:00 UTC — suspected Binance API call with no timeout; **fixed in `[Unreleased] — Hang-storm guard`** (two-layer timeout on every ccxt async REST call; defaults 12s inner / 15s outer; operator-tunable via `safety.api_*_timeout_seconds`)
