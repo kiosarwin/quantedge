@@ -1,0 +1,5 @@
+# Dev-only dependencies. Install on top of requirements.lock:
+#   pip install -r requirements.lock -r requirements-dev.txt
+#
+# These are NOT installed by paper / live runs.
+pytest

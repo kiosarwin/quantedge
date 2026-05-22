@@ -1,8 +1,28 @@
+# requirements.txt — human-edited list of DIRECT runtime dependencies.
+#
+# DO NOT pip install this file for paper or live runs.
+# Use requirements.lock instead — it pins the full transitive graph for
+# reproducible installs (CI, prod, paper-validation runs).
+#
+# Workflow:
+#   1. Edit this file when adding / removing a direct dep.
+#   2. Regenerate the lock from a clean Python 3.11 venv:
+#         pip install -r requirements.txt
+#         pip freeze | sort -f > requirements.lock
+#      (or `uv pip compile requirements.txt --python-version 3.11`
+#      if uv is available)
+#   3. Commit BOTH files together.
+#
+# History note (2026-05-22): pandas-ta was removed from this list because it
+# had zero imports in src/ and tests/ AND its current PyPI versions require
+# Python >= 3.12 (we are on 3.11+, the codebase uses `from datetime import
+# UTC` which is 3.11+). Reintroduce alongside a deliberate Python bump if
+# ever needed.
+
 python-binance
 ccxt
 pandas
 numpy
-pandas-ta
 scipy
 scikit-learn
 xgboost
