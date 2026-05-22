@@ -28,6 +28,48 @@ _BASE = "https://api.telegram.org/bot{token}/sendMessage"
 _PHOTO_BASE = "https://api.telegram.org/bot{token}/sendPhoto"
 _MAX_MESSAGE_LEN = 4000
 
+# Short labels for rejection stages — used in the "Why no signal" block.
+# Mirrors src/analysis/rejection_logger.py:_STAGE_LABELS but kept local so
+# notifications stay independent of the rejection module.
+_REJECT_STAGE_LABELS = {
+    "gate_regime":          "G-REG",
+    "gate_sm":              "G-SM",
+    "gate_ev":              "G-EV",
+    "score_threshold":      "SCORE",
+    "ml_rejected":          "ML",
+    "regime_gate":          "RGATE",
+    "risk_guard":           "RISK",
+    "extreme_vol":          "VOL",
+    "fm_veto":              "FM",
+    "setup_none":           "SETUP",
+    "correlation_cap":      "CORR",
+    "cohort_policy":        "COHORT",
+    "edge_blocked":         "EDGE",
+    "lifecycle_blocked":    "LIFE",
+    "paper_scope":          "PSCOPE",
+    "confirmation_pending": "CONF",
+}
+
+
+def _progress_bar(util: float, width: int = 10) -> str:
+    """Render a 10-cell ▓/░ bar from a 0..1 utilization fraction."""
+    util = max(0.0, min(1.0, float(util or 0.0)))
+    filled = int(round(util * width))
+    return "▓" * filled + "░" * (width - filled)
+
+
+def _format_remaining(seconds: int | float | None) -> str:
+    """Compact 'Nm' / 'Nh Mm' / 'Ns' label for a remaining duration."""
+    if not seconds or seconds <= 0:
+        return ""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    h, m = divmod(s, 3600)
+    return f"{h}h {m // 60}m"
+
 
 class TelegramNotifier:
     def __init__(self, cfg: dict):
@@ -64,6 +106,146 @@ class TelegramNotifier:
             return int(value)
         except (TypeError, ValueError):
             return default
+
+    # ------------------------------------------------------------------ #
+    #  Risk-budget + rejection rendering helpers                           #
+    # ------------------------------------------------------------------ #
+
+    @classmethod
+    def _render_risk_budget_block(cls, rb: dict | None) -> list[str]:
+        """Multi-line risk-budget block for the cycle report.
+
+        Returns [] when rb is empty so callers can splice unconditionally.
+        """
+        if not rb or not isinstance(rb, dict):
+            return []
+
+        lines: list[str] = ["🛡️ *Risk Budget:*"]
+
+        halt = rb.get("halt") or {}
+        if halt.get("active"):
+            reason = str(halt.get("reason") or "halted").replace("_", " ")
+            remaining = _format_remaining(halt.get("remaining_s"))
+            tail = f" · resumes in {remaining}" if remaining else ""
+            lines.append(f"Halt        🛑 *{reason}*{tail}")
+        else:
+            lines.append("Halt        🟢 none")
+
+        for key, label in (
+            ("daily_loss",     "Daily P&L "),
+            ("weekly_loss",    "Weekly    "),
+            ("drawdown",       "Drawdown  "),
+        ):
+            section = rb.get(key)
+            if not section:
+                continue
+            used = cls._safe_float(section.get("used_pct") or section.get("current_pct"))
+            cap  = cls._safe_float(section.get("cap_pct"))
+            util = cls._safe_float(section.get("utilization"))
+            bar  = _progress_bar(util)
+            pct  = int(round(util * 100))
+            lines.append(f"{label}  `{used:+.2f}% / cap {cap:.2f}%`  {bar} {pct}%")
+
+        concurrent = rb.get("concurrent")
+        if concurrent:
+            opn  = cls._safe_int(concurrent.get("open"))
+            cap  = cls._safe_int(concurrent.get("cap"))
+            util = cls._safe_float(concurrent.get("utilization"))
+            bar  = _progress_bar(util)
+            pct  = int(round(util * 100))
+            lines.append(f"Open        `{opn} / {cap}`  {bar} {pct}%")
+
+        agg = rb.get("aggregate_risk")
+        if agg:
+            opn  = cls._safe_float(agg.get("open_pct"))
+            cap  = cls._safe_float(agg.get("cap_pct"))
+            util = cls._safe_float(agg.get("utilization"))
+            bar  = _progress_bar(util)
+            pct  = int(round(util * 100))
+            lines.append(f"Aggregate   `{opn:.2f}% / {cap:.2f}%`  {bar} {pct}%")
+
+        streak = rb.get("consecutive_losses")
+        if streak:
+            cur  = cls._safe_int(streak.get("current"))
+            cap  = cls._safe_int(streak.get("cap"))
+            cmin = cls._safe_int(streak.get("cooldown_minutes"))
+            if cur <= 0:
+                lines.append("Streak      `0 losses`")
+            else:
+                if cap > 0 and cmin > 0:
+                    lines.append(f"Streak      `{cur} loss → cooldown after {cap} ({cmin}m)`")
+                else:
+                    lines.append(f"Streak      `{cur} loss`")
+
+        corr = rb.get("correlation")
+        if corr:
+            enabled = bool(corr.get("enabled"))
+            cap     = cls._safe_float(corr.get("cap"))
+            label   = "enabled" if enabled else "disabled"
+            lines.append(f"Correlation cap `{cap:.2f}` · {label}")
+
+        return lines
+
+    @classmethod
+    def _render_risk_budget_compact(cls, rb: dict | None) -> list[str]:
+        """One-or-two-line risk-budget summary for the heartbeat."""
+        if not rb or not isinstance(rb, dict):
+            return []
+        out: list[str] = []
+        halt = rb.get("halt") or {}
+        if halt.get("active"):
+            reason = str(halt.get("reason") or "halted").replace("_", " ")
+            remaining = _format_remaining(halt.get("remaining_s"))
+            tail = f" · {remaining} left" if remaining else ""
+            out.append(f"🛑 HALTED: {reason}{tail}")
+
+        parts: list[str] = []
+        daily = rb.get("daily_loss") or {}
+        if daily:
+            used = cls._safe_float(daily.get("used_pct"))
+            cap  = cls._safe_float(daily.get("cap_pct"))
+            pct  = int(round(cls._safe_float(daily.get("utilization")) * 100))
+            parts.append(f"Daily `{used:+.2f}%/{cap:.2f}%` ({pct}%)")
+        dd = rb.get("drawdown") or {}
+        if dd:
+            cur  = cls._safe_float(dd.get("current_pct"))
+            cap  = cls._safe_float(dd.get("cap_pct"))
+            pct  = int(round(cls._safe_float(dd.get("utilization")) * 100))
+            parts.append(f"DD `{cur:.1f}%/{cap:.1f}%` ({pct}%)")
+        concurrent = rb.get("concurrent") or {}
+        if concurrent:
+            opn  = cls._safe_int(concurrent.get("open"))
+            cap  = cls._safe_int(concurrent.get("cap"))
+            pct  = int(round(cls._safe_float(concurrent.get("utilization")) * 100))
+            parts.append(f"Open `{opn}/{cap}` ({pct}%)")
+        if parts:
+            out.append("🛡️ " + " · ".join(parts))
+        return out
+
+    @staticmethod
+    def _render_rejection_summary_block(rs: dict | None) -> list[str]:
+        """'Why no signal' block — top-N rejection stages with sample reason."""
+        if not rs or not isinstance(rs, dict):
+            return []
+        total = int(rs.get("total") or 0)
+        stages = rs.get("stages") or []
+        if total <= 0 or not stages:
+            return []
+        lines = [f"🚫 *Why no signal* ({total} rejects this cycle):"]
+        for entry in stages:
+            stage = str(entry.get("stage", ""))
+            count = int(entry.get("count") or 0)
+            label = _REJECT_STAGE_LABELS.get(stage, stage.upper() or "?")
+            top_reason = str(entry.get("top_reason") or "").strip()
+            # Telegram Markdown is finicky around backticks — sanitize newlines.
+            top_reason = top_reason.replace("\n", " ").replace("`", "'")
+            if top_reason:
+                if len(top_reason) > 80:
+                    top_reason = top_reason[:77] + "..."
+                lines.append(f"• `{label}` × {count} — {top_reason}")
+            else:
+                lines.append(f"• `{label}` × {count}")
+        return lines
 
     async def trade_opened(
         self,
@@ -234,6 +416,7 @@ class TelegramNotifier:
         top_signals: list[str],
         floating_positions: list[dict] | None = None,
         open_positions: list[dict] | None = None,
+        risk_budget: dict | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -241,16 +424,20 @@ class TelegramNotifier:
         drawdown_pct = self._safe_float(drawdown_pct)
         daily_pnl_pct = self._safe_float(daily_pnl_pct)
         status = "🟢 Active" if open_trades > 0 else "⏳ Scanning"
+        # Halted bots take priority — operator must see this even at a glance.
+        if risk_budget and (risk_budget.get("halt") or {}).get("active"):
+            status = "🛑 Halted"
         top_line = ", ".join(top_signals[:3]) if top_signals else "none"
         floating_total = sum(self._safe_float(p.get("pnl_usd", 0.0)) for p in floating_positions or [])
         effective_equity = equity + floating_total
-        msg = (
-            f"🧮 *Heartbeat*\n"
-            f"{status} | Equity *${effective_equity:,.2f}* | Open `{open_trades}`\n"
-            f"P&L `{daily_pnl_pct:+.2f}%` | DD `{drawdown_pct:.1f}%`\n"
-            f"Top: {top_line}"
-        )
-        await self._send(msg)
+        msg_lines = [
+            f"🧮 *Heartbeat*",
+            f"{status} | Equity *${effective_equity:,.2f}* | Open `{open_trades}`",
+            f"P&L `{daily_pnl_pct:+.2f}%` | DD `{drawdown_pct:.1f}%`",
+            f"Top: {top_line}",
+        ]
+        msg_lines.extend(self._render_risk_budget_compact(risk_budget))
+        await self._send("\n".join(msg_lines))
 
     async def cycle_report(
         self,
@@ -280,6 +467,8 @@ class TelegramNotifier:
         regime_thresholds: dict | None = None,
         jim_bonus: float = 0.0,
         bootstrap_audit: list[str] | None = None,
+        risk_budget: dict | None = None,
+        rejection_summary: dict | None = None,
     ) -> None:
         if not self._enabled:
             return
@@ -406,6 +595,12 @@ class TelegramNotifier:
         if jim_block:
             lines.append(jim_block)
 
+        # ── Risk Budget (halt + caps utilization) ───────────────────
+        rb_lines = self._render_risk_budget_block(risk_budget)
+        if rb_lines:
+            lines.append(f"──────────────────────")
+            lines.extend(rb_lines)
+
         # ── Open Positions ────────────────────────────────────────────
         lines.append(f"──────────────────────")
         lines.append(f"🗂️ *Open Positions:*")
@@ -485,6 +680,10 @@ class TelegramNotifier:
         if not breakdowns:
             lines.append(f"_No symbols scored this cycle — scanner returned no eligible setups._")
             lines.append("Legend: `R` regime, `S` smart-money alignment, `X` net expectancy after fees/cost.")
+            rej_lines = self._render_rejection_summary_block(rejection_summary)
+            if rej_lines:
+                lines.append(f"──────────────────────")
+                lines.extend(rej_lines)
             lines.append(f"──────────────────────")
             lines.append(f"🗺️ *Roadmap:*")
             if readiness_passed:
@@ -534,6 +733,12 @@ class TelegramNotifier:
         if fire_count == 0:
             lines.append(f"_No signals above threshold yet — waiting for setup._")
         lines.append("Legend: `R` regime, `S` smart-money alignment, `X` net expectancy after fees/cost.")
+
+        # ── Why no signal (rejection forensics) ────────────────────
+        rej_lines = self._render_rejection_summary_block(rejection_summary)
+        if rej_lines:
+            lines.append(f"──────────────────────")
+            lines.extend(rej_lines)
 
         # ── Roadmap ───────────────────────────────────────────────────
         lines.append(f"──────────────────────")

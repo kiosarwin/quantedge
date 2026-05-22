@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -116,6 +117,11 @@ class RejectionLogger:
         self._min_trades = int(ev_cfg.get("min_trades_for_ev", 20))
 
         self._buffer: list[dict] = []
+        # Per-cycle tally — independent of disk buffer so flush failures don't
+        # erase visibility. Reset by cycle_summary(reset=True) at the cycle
+        # boundary in main.py after the Telegram report has consumed it.
+        self._cycle_counts: Counter = Counter()
+        self._cycle_reasons: dict[str, Counter] = {}
         if self._enabled:
             self._path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -164,6 +170,10 @@ class RejectionLogger:
                 rec.fm_scale,
             )
             self._buffer.append(asdict(rec))
+            # Per-cycle tally (separate from disk buffer)
+            self._cycle_counts[stage] += 1
+            stage_reasons = self._cycle_reasons.setdefault(stage, Counter())
+            stage_reasons[reason] += 1
             if len(self._buffer) >= self._flush_every:
                 self.flush()
         except Exception as exc:
@@ -187,6 +197,46 @@ class RejectionLogger:
             self._buffer.clear()
         except Exception as exc:
             log.warning("RejectionLogger.flush failed: %s", exc)
+
+    # ------------------------------------------------------------------ #
+    #  Per-cycle summary (telemetry for Telegram cycle report)             #
+    # ------------------------------------------------------------------ #
+
+    def cycle_summary(self, top_n: int = 3, reset: bool = False) -> dict:
+        """Return aggregated rejection counts since the last reset.
+
+        Args:
+            top_n:  how many stages to surface (sorted by count desc).
+            reset:  if True, clear the per-cycle tally after snapshotting.
+
+        Returns:
+            {
+              "total": int,                     # all rejects this window
+              "stages": [
+                  {"stage": str, "count": int,
+                   "top_reason": str, "top_count": int}, ...
+              ]
+            }
+            Empty stages list when nothing was logged.
+        """
+        total = int(sum(self._cycle_counts.values()))
+        stages = []
+        for stage, count in self._cycle_counts.most_common(max(1, int(top_n))):
+            reasons = self._cycle_reasons.get(stage)
+            if reasons:
+                top_reason, top_count = reasons.most_common(1)[0]
+            else:
+                top_reason, top_count = "", 0
+            stages.append({
+                "stage": stage,
+                "count": int(count),
+                "top_reason": str(top_reason),
+                "top_count": int(top_count),
+            })
+        if reset:
+            self._cycle_counts.clear()
+            self._cycle_reasons.clear()
+        return {"total": total, "stages": stages}
 
     # ------------------------------------------------------------------ #
     #  Internals                                                           #

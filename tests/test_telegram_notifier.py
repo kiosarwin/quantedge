@@ -544,3 +544,270 @@ def test_shutdown_reports_preserved_positions(monkeypatch):
 
     assert "Mode: `LIVE`" in sent["message"]
     assert "Open positions preserved on shutdown." in sent["message"]
+
+
+
+# ── Risk-budget + rejection visibility (feat/telegram-risk-visibility) ──
+
+
+def _make_notifier(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {}})
+    sent: dict[str, str] = {}
+
+    async def fake_send(message: str) -> None:
+        sent["message"] = message
+
+    notifier._send = fake_send  # type: ignore[attr-defined]
+    return notifier, sent
+
+
+def test_heartbeat_renders_risk_budget_compact(monkeypatch):
+    notifier, sent = _make_notifier(monkeypatch)
+
+    risk_budget = {
+        "halt": {"active": False, "reason": "", "remaining_s": None},
+        "daily_loss":  {"used_pct": -2.10, "cap_pct": 4.0, "utilization": 0.525},
+        "drawdown":    {"current_pct": 1.8, "cap_pct": 10.0, "utilization": 0.18},
+        "concurrent":  {"open": 3, "cap": 5, "utilization": 0.6},
+    }
+
+    asyncio.run(
+        notifier.heartbeat(
+            equity=100.0,
+            drawdown_pct=1.8,
+            daily_pnl_pct=-2.1,
+            open_trades=3,
+            top_signals=[],
+            risk_budget=risk_budget,
+        )
+    )
+
+    msg = sent["message"]
+    assert "Daily `-2.10%/4.00%`" in msg
+    assert "DD `1.8%/10.0%`" in msg
+    assert "Open `3/5`" in msg
+    assert "🛡️" in msg
+    assert "HALTED" not in msg
+
+
+def test_heartbeat_shows_halt_banner(monkeypatch):
+    notifier, sent = _make_notifier(monkeypatch)
+
+    risk_budget = {
+        "halt": {
+            "active": True,
+            "reason": "daily loss cap hit (-4.10%)",
+            "remaining_s": None,
+        },
+        "daily_loss": {"used_pct": -4.10, "cap_pct": 4.0, "utilization": 1.0},
+    }
+
+    asyncio.run(
+        notifier.heartbeat(
+            equity=80.0, drawdown_pct=2.0, daily_pnl_pct=-4.1, open_trades=0,
+            top_signals=[], risk_budget=risk_budget,
+        )
+    )
+
+    msg = sent["message"]
+    assert "🛑 Halted" in msg
+    assert "🛑 HALTED:" in msg
+    assert "daily loss cap hit (-4.10%)" in msg
+
+
+def test_heartbeat_shows_cooldown_remaining(monkeypatch):
+    notifier, sent = _make_notifier(monkeypatch)
+
+    risk_budget = {
+        "halt": {
+            "active": True,
+            "reason": "cooldown after loss streak",
+            "remaining_s": 720,  # 12m
+        },
+    }
+
+    asyncio.run(
+        notifier.heartbeat(
+            equity=80.0, drawdown_pct=2.0, daily_pnl_pct=-1.0, open_trades=0,
+            top_signals=[], risk_budget=risk_budget,
+        )
+    )
+
+    msg = sent["message"]
+    assert "12m left" in msg
+
+
+def test_heartbeat_back_compat_without_risk_budget(monkeypatch):
+    """No risk_budget kwarg → original output, no extra lines."""
+    notifier, sent = _make_notifier(monkeypatch)
+
+    asyncio.run(
+        notifier.heartbeat(
+            equity=80.0, drawdown_pct=1.2, daily_pnl_pct=0.5,
+            open_trades=2, top_signals=["BTC long 88"],
+        )
+    )
+
+    msg = sent["message"]
+    assert "🛡️" not in msg
+    assert "HALTED" not in msg
+
+
+def test_cycle_report_renders_risk_budget_block(monkeypatch):
+    notifier, sent = _make_notifier(monkeypatch)
+
+    risk_budget = {
+        "halt": {"active": False, "reason": "", "remaining_s": None},
+        "daily_loss":     {"used_pct": -2.10, "cap_pct": 4.0,  "utilization": 0.525},
+        "drawdown":       {"current_pct": 1.8, "cap_pct": 10.0, "utilization": 0.18},
+        "concurrent":     {"open": 3, "cap": 5, "utilization": 0.6},
+        "aggregate_risk": {"open_pct": 4.5, "cap_pct": 10.0, "utilization": 0.45},
+        "consecutive_losses": {"current": 2, "cap": 4, "cooldown_minutes": 30},
+        "correlation":    {"enabled": True, "cap": 0.85},
+    }
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity=80.0, drawdown_pct=1.8, daily_pnl_pct=-2.1,
+            open_trades=3, cycle_num=42, total_trades=0, starting_equity=80.0,
+            risk_budget=risk_budget,
+        )
+    )
+
+    msg = sent["message"]
+    assert "🛡️ *Risk Budget:*" in msg
+    assert "Halt        🟢 none" in msg
+    assert "Daily P&L" in msg and "-2.10% / cap 4.00%" in msg
+    assert "Drawdown" in msg and "1.80% / cap 10.00%" in msg
+    assert "Open        `3 / 5`" in msg
+    assert "Aggregate" in msg and "4.50% / 10.00%" in msg
+    assert "Streak      `2 loss → cooldown after 4 (30m)`" in msg
+    assert "Correlation cap `0.85` · enabled" in msg
+
+
+def test_cycle_report_renders_halt_banner_with_remaining(monkeypatch):
+    notifier, sent = _make_notifier(monkeypatch)
+
+    risk_budget = {
+        "halt": {
+            "active": True,
+            "reason": "cooldown after loss streak",
+            "remaining_s": 1800,  # 30m
+        },
+    }
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity=80.0, drawdown_pct=2.0, daily_pnl_pct=-1.0,
+            open_trades=0, cycle_num=42, total_trades=0, starting_equity=80.0,
+            risk_budget=risk_budget,
+        )
+    )
+
+    msg = sent["message"]
+    assert "🛑 *cooldown after loss streak*" in msg
+    assert "resumes in 30m" in msg
+
+
+def test_cycle_report_renders_rejection_summary(monkeypatch):
+    notifier, sent = _make_notifier(monkeypatch)
+
+    rejection_summary = {
+        "total": 47,
+        "stages": [
+            {"stage": "score_threshold", "count": 18,
+             "top_reason": "score=42.1 < thresh=65.0", "top_count": 18},
+            {"stage": "gate_sm", "count": 12,
+             "top_reason": "sm_phase=neutral score=48", "top_count": 12},
+            {"stage": "risk_guard", "count": 8,
+             "top_reason": "daily loss cap hit (-4.10%)", "top_count": 8},
+        ],
+    }
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity=80.0, drawdown_pct=0.0, daily_pnl_pct=0.0,
+            open_trades=0, cycle_num=43, total_trades=0, starting_equity=80.0,
+            rejection_summary=rejection_summary,
+        )
+    )
+
+    msg = sent["message"]
+    assert "🚫 *Why no signal* (47 rejects this cycle):" in msg
+    assert "`SCORE` × 18 — score=42.1 < thresh=65.0" in msg
+    assert "`G-SM` × 12 — sm_phase=neutral score=48" in msg
+    assert "`RISK` × 8 — daily loss cap hit (-4.10%)" in msg
+
+
+def test_cycle_report_skips_empty_rejection_summary(monkeypatch):
+    notifier, sent = _make_notifier(monkeypatch)
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity=80.0, drawdown_pct=0.0, daily_pnl_pct=0.0,
+            open_trades=0, cycle_num=44, total_trades=0, starting_equity=80.0,
+            rejection_summary={"total": 0, "stages": []},
+        )
+    )
+
+    msg = sent["message"]
+    assert "Why no signal" not in msg
+
+
+def test_cycle_report_back_compat_without_new_kwargs(monkeypatch):
+    """Old call sites (no risk_budget/rejection_summary) still work."""
+    notifier, sent = _make_notifier(monkeypatch)
+
+    asyncio.run(
+        notifier.cycle_report(
+            breakdowns=[],
+            equity=80.0, drawdown_pct=0.0, daily_pnl_pct=0.0,
+            open_trades=0, cycle_num=45, total_trades=0, starting_equity=80.0,
+        )
+    )
+
+    msg = sent["message"]
+    assert "Risk Budget" not in msg
+    assert "Why no signal" not in msg
+    assert "JIM SIMONS — FUND MANAGER REPORT" in msg
+
+
+def test_render_helpers_round_trip():
+    """Pure render helpers are deterministic — handy to test directly."""
+    rb_lines = TelegramNotifier._render_risk_budget_block({
+        "halt": {"active": False, "reason": "", "remaining_s": None},
+        "daily_loss":  {"used_pct": -1.0, "cap_pct": 4.0, "utilization": 0.25},
+        "concurrent":  {"open": 1, "cap": 5, "utilization": 0.20},
+    })
+    assert any("🛡️" in line for line in rb_lines)
+    assert any("Halt        🟢 none" in line for line in rb_lines)
+    # 25% utilization → roughly 2-3 filled cells in a 10-wide bar
+    assert any("░░░" in line for line in rb_lines)
+
+    compact = TelegramNotifier._render_risk_budget_compact({})
+    assert compact == []
+
+    block = TelegramNotifier._render_rejection_summary_block(None)
+    assert block == []
+
+    block = TelegramNotifier._render_rejection_summary_block({"total": 0, "stages": []})
+    assert block == []
+
+
+def test_render_rejection_summary_truncates_long_reasons():
+    long_reason = "x" * 200
+    block = TelegramNotifier._render_rejection_summary_block({
+        "total": 1,
+        "stages": [{"stage": "score_threshold", "count": 1,
+                    "top_reason": long_reason, "top_count": 1}],
+    })
+    # Body line should contain the truncated marker, not the full 200 chars.
+    body = block[1]
+    assert "..." in body
+    assert len(body) < 130

@@ -701,6 +701,7 @@ class NinjaTrader:
                         top_signals=top_names,
                         floating_positions=_floating,
                         open_positions=self._telegram_open_positions(),
+                        risk_budget=self._build_risk_budget(),
                     )
                 # ── Monitor open trades ───────────────────────────────────
                 if self._shadow:
@@ -1612,6 +1613,158 @@ class NinjaTrader:
         )
         return format_bootstrap_audit_lines(audit)
 
+    def _build_risk_budget(self) -> dict:
+        """Snapshot of every active capital-protection budget for Telegram.
+
+        Pure read-only — touches RiskManager state and config caps. Returns a
+        dict whose shape matches TelegramNotifier._render_risk_budget_block.
+
+        Halt is "active" whenever the bot will refuse the next trade for
+        risk reasons (kill-switch, cooldown, daily/weekly cap, max DD,
+        consecutive-loss cap). The reason follows can_open_trade() priority
+        so the heartbeat shows the same explanation an operator would see
+        in logs.
+
+        Defensive `getattr` reads keep the telemetry pipeline alive even if
+        a future RiskManager refactor renames/removes a state field.
+        """
+        risk_cfg = self._cfg.get("risk", {}) or {}
+        trading_cfg = self._cfg.get("trading", {}) or {}
+        safety_cfg = self._cfg.get("safety", {}) or {}
+        state = self._risk.state
+
+        def _g(name: str, default):
+            return getattr(state, name, default)
+
+        # ── Halt status (mirror RiskManager.can_open_trade priority) ──
+        now = time.time()
+        halt_active = False
+        halt_reason = ""
+        halt_remaining_s: int | None = None
+
+        kill_reason = _g("kill_switch_reason", "")
+        paused_until = float(_g("paused_until_ts", 0.0) or 0.0)
+        if kill_reason:
+            halt_active = True
+            halt_reason = f"kill switch: {kill_reason}"
+        elif paused_until and paused_until > now:
+            halt_active = True
+            halt_remaining_s = int(paused_until - now)
+            halt_reason = "cooldown after loss streak"
+
+        # ── Daily loss budget ─────────────────────────────────────
+        daily_cap = float(risk_cfg.get("daily_loss_cap_pct", 0.0) or 0.0)
+        daily_used = float(_g("daily_pnl_pct", 0.0) or 0.0)
+        # Utilization tracks distance into the loss cap; positive PnL = 0%.
+        if daily_cap > 0 and daily_used < 0:
+            daily_util = min(1.0, abs(daily_used) / daily_cap)
+        else:
+            daily_util = 0.0
+        if not halt_active and daily_cap > 0 and abs(daily_used) >= daily_cap and daily_used < 0:
+            halt_active = True
+            halt_reason = f"daily loss cap hit ({daily_used:.2f}%)"
+
+        # ── Weekly loss budget (optional) ──────────────────────────
+        weekly_cap = float(risk_cfg.get("weekly_loss_cap_pct", 0.0) or 0.0)
+        weekly_block: dict | None = None
+        if weekly_cap > 0:
+            weekly_used = float(_g("weekly_pnl_pct", 0.0) or 0.0)
+            if weekly_used < 0:
+                weekly_util = min(1.0, abs(weekly_used) / weekly_cap)
+            else:
+                weekly_util = 0.0
+            weekly_block = {
+                "used_pct": weekly_used,
+                "cap_pct": weekly_cap,
+                "utilization": weekly_util,
+            }
+            if not halt_active and weekly_used <= -weekly_cap:
+                halt_active = True
+                halt_reason = f"weekly loss cap hit ({weekly_used:.2f}%)"
+
+        # ── Drawdown ──────────────────────────────────────────────
+        dd_cap = float(risk_cfg.get("max_drawdown_pct", 0.0) or 0.0)
+        dd_cur = float(_g("drawdown_pct", 0.0) or 0.0)
+        dd_util = min(1.0, dd_cur / dd_cap) if dd_cap > 0 else 0.0
+        if not halt_active and dd_cap > 0 and dd_cur >= dd_cap:
+            halt_active = True
+            halt_reason = f"max drawdown hit ({dd_cur:.2f}%)"
+
+        # ── Consecutive losses ────────────────────────────────────
+        cons_cur = int(_g("consecutive_losses", 0) or 0)
+        cons_cap = int(safety_cfg.get("max_consecutive_losses", 0) or 0)
+        cooldown_min = int(risk_cfg.get("cooldown_minutes", 0) or 0)
+        cooldown_after = int(risk_cfg.get("cooldown_after_loss_streak", 0) or 0)
+        if not halt_active and cons_cap > 0 and cons_cur >= cons_cap:
+            halt_active = True
+            halt_reason = f"consecutive losses limit ({cons_cur})"
+
+        # ── Concurrent positions ──────────────────────────────────
+        open_now = int(_g("open_trade_count", 0) or 0)
+        max_open = int(trading_cfg.get("max_open_trades", 0) or 0)
+        open_util = min(1.0, open_now / max_open) if max_open > 0 else 0.0
+
+        # ── Aggregate open risk ───────────────────────────────────
+        per_trade_cap = float(risk_cfg.get("max_risk_per_trade_pct", 0.0) or 0.0)
+        agg_cap = per_trade_cap * max_open if (per_trade_cap > 0 and max_open > 0) else 0.0
+        agg_used = float(_g("open_risk_pct", 0.0) or 0.0)
+        agg_util = min(1.0, agg_used / agg_cap) if agg_cap > 0 else 0.0
+
+        # ── Correlation filter ────────────────────────────────────
+        corr_cfg = (risk_cfg.get("correlation_filter") or {}) if isinstance(risk_cfg.get("correlation_filter"), dict) else {}
+        correlation = {
+            "enabled": bool(corr_cfg.get("enabled", True)),
+            "cap": float(corr_cfg.get("corr_max", 0.85) or 0.85),
+        }
+
+        return {
+            "halt": {
+                "active": halt_active,
+                "reason": halt_reason,
+                "remaining_s": halt_remaining_s,
+            },
+            "daily_loss": {
+                "used_pct": daily_used,
+                "cap_pct": daily_cap,
+                "utilization": daily_util,
+            },
+            "weekly_loss": weekly_block,
+            "drawdown": {
+                "current_pct": dd_cur,
+                "cap_pct": dd_cap,
+                "utilization": dd_util,
+            },
+            "concurrent": {
+                "open": open_now,
+                "cap": max_open,
+                "utilization": open_util,
+            },
+            "aggregate_risk": {
+                "open_pct": agg_used,
+                "cap_pct": agg_cap,
+                "utilization": agg_util,
+            },
+            "consecutive_losses": {
+                "current": cons_cur,
+                "cap": cons_cap,
+                "cooldown_minutes": cooldown_min,
+                "cooldown_after": cooldown_after,
+            },
+            "correlation": correlation,
+        }
+
+    def _rejection_summary(self, top_n: int = 3, reset: bool = True) -> dict:
+        """Pull the per-cycle rejection tally for Telegram, tolerating an
+        absent `_rej` attribute (e.g. paper-validation harness mocks)."""
+        rej = getattr(self, "_rej", None)
+        if rej is None or not hasattr(rej, "cycle_summary"):
+            return {"total": 0, "stages": []}
+        try:
+            return rej.cycle_summary(top_n=top_n, reset=reset)
+        except Exception as exc:  # pragma: no cover — telemetry must not crash trading
+            log.warning("rejection summary failed: %s", exc)
+            return {"total": 0, "stages": []}
+
     async def _maybe_send_fund_manager_report(
         self,
         breakdowns: list[SignalBreakdown],
@@ -1671,6 +1824,8 @@ class NinjaTrader:
             starting_equity=self._starting_equity,
             regime_thresholds=self._trading.get("regime_thresholds", {}),
             jim_bonus=self._fund_mgr.bonus,
+            risk_budget=self._build_risk_budget(),
+            rejection_summary=self._rejection_summary(top_n=3, reset=True),
         )
 
     async def _maybe_send_equity_graph_report(self, cycle_num: int = 0) -> None:
