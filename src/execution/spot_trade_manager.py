@@ -12,13 +12,19 @@ Exit logic per trade:
 Early exit triggers:
   - Volume collapses (< 50% of average) after TP1 hit
   - BTC guard flips to HALTED mid-trade (optional — sell if configured)
+
+Open trades are persisted to ``data/spot_open_trades.json`` so that a
+process restart does not orphan a live spot position (spot has no
+exchange-side stop orders — all stop logic runs in-process).
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
 from typing import Callable, Awaitable
 
 from src.data.spot_client import BinanceSpotClient
@@ -84,6 +90,8 @@ CloseCallback = Callable[["SpotTrade", float, str], Awaitable[None]]
 
 
 class SpotTradeManager:
+    STATE_PATH = Path("data/spot_open_trades.json")
+
     def __init__(
         self,
         client: BinanceSpotClient,
@@ -101,6 +109,7 @@ class SpotTradeManager:
         self._on_close = on_close
         self._max_hold_hours: float = self._exit.get("max_hold_hours", 120)
         self._trail_pct: float = self._exit.get("trailing_stop_pct", 0.05)
+        self._load_state()
 
     # ------------------------------------------------------------------ #
     #  Public API                                                         #
@@ -134,6 +143,7 @@ class SpotTradeManager:
         )
         self._trades[setup.symbol] = trade
         self._risk.on_trade_opened()
+        self._save_state()
 
         log.info(
             "OPENED %s  price=%.6f  qty=%.6f ($%.2f)  sl=%.6f  tp1=%.6f  strategy=%s",
@@ -229,6 +239,7 @@ class SpotTradeManager:
 
         # Start trailing stop
         trade.trailing_stop = price * (1 - self._trail_pct)
+        self._save_state()
 
         log.info(
             "TP1 hit %s @ %.6f  sold=%.6f  pnl=+$%.2f  new_sl=%.6f (breakeven)",
@@ -251,6 +262,7 @@ class SpotTradeManager:
         trade.remaining_qty -= sell_qty
         trade.remaining_qty = max(0.0, trade.remaining_qty)
         trade.tp2_hit = True
+        self._save_state()
 
         log.info(
             "TP2 hit %s @ %.6f  sold=%.6f  pnl=+$%.2f  remaining=%.6f",
@@ -279,6 +291,7 @@ class SpotTradeManager:
             await self._on_close(trade, total_pnl, reason)
 
         del self._trades[trade.symbol]
+        self._save_state()
 
         emoji = "✅" if total_pnl > 0 else "❌"
         log.info(
@@ -286,3 +299,76 @@ class SpotTradeManager:
             emoji, trade.symbol, price,
             "+" if total_pnl >= 0 else "", total_pnl, pnl_pct, reason,
         )
+
+    # ------------------------------------------------------------------ #
+    #  State persistence — survive bot/watchdog restarts                 #
+    # ------------------------------------------------------------------ #
+
+    def _save_state(self) -> None:
+        try:
+            self.STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "trades": [self._serialize_trade(t) for t in self._trades.values()],
+                "updated_at": time.time(),
+            }
+            self.STATE_PATH.write_text(json.dumps(payload))
+        except Exception as exc:
+            log.warning("Spot trade state save failed: %s", exc)
+
+    def _load_state(self) -> None:
+        if not self.STATE_PATH.exists():
+            return
+        try:
+            data = json.loads(self.STATE_PATH.read_text())
+            for td in data.get("trades", []):
+                trade = self._deserialize_trade(td)
+                if trade is not None:
+                    self._trades[trade.symbol] = trade
+                    self._risk.on_trade_opened()
+            if self._trades:
+                log.info(
+                    "Restored %d open spot trades: %s",
+                    len(self._trades), list(self._trades.keys()),
+                )
+        except Exception as exc:
+            log.warning("Spot trade state load failed: %s", exc)
+
+    @staticmethod
+    def _serialize_trade(trade: "SpotTrade") -> dict:
+        return {
+            "setup": asdict(trade.setup),
+            "entry_order_id": trade.entry_order_id,
+            "opened_at": trade.opened_at,
+            "remaining_qty": trade.remaining_qty,
+            "cost_basis": trade.cost_basis,
+            "realized_pnl_usdt": trade.realized_pnl_usdt,
+            "tp1_hit": trade.tp1_hit,
+            "tp2_hit": trade.tp2_hit,
+            "trailing_stop": trade.trailing_stop,
+            "peak_price": trade.peak_price,
+        }
+
+    @staticmethod
+    def _deserialize_trade(td: dict) -> "SpotTrade | None":
+        try:
+            allowed = {f.name for f in fields(SpotTradeSetup)}
+            setup_payload = {k: v for k, v in (td.get("setup") or {}).items() if k in allowed}
+            setup = SpotTradeSetup(**setup_payload)
+            return SpotTrade(
+                setup=setup,
+                entry_order_id=td.get("entry_order_id", ""),
+                opened_at=float(td.get("opened_at", time.time())),
+                remaining_qty=float(td.get("remaining_qty", setup.base_qty)),
+                cost_basis=float(td.get("cost_basis", setup.entry_price)),
+                realized_pnl_usdt=float(td.get("realized_pnl_usdt", 0.0)),
+                tp1_hit=bool(td.get("tp1_hit", False)),
+                tp2_hit=bool(td.get("tp2_hit", False)),
+                trailing_stop=td.get("trailing_stop"),
+                peak_price=float(td.get("peak_price", setup.entry_price)),
+            )
+        except Exception as exc:
+            log.warning(
+                "Failed to deserialize spot trade %s: %s",
+                (td.get("setup") or {}).get("symbol", "?"), exc,
+            )
+            return None

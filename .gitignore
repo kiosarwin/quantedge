@@ -11,7 +11,7 @@ data/
 data/cache/
 data/trades/
 logs/
-models/
+/models/
 src/backtest/data/cache/
 config/*.bak*
 2026-*.txt

@@ -58,11 +58,16 @@ class SpotSignalBreakdown:
     entry_strategy: str = "none"
     entry_confidence: float = 0.0
 
+    # Filled in by SpotScorer at construction time so the threshold is
+    # configurable instead of a hardcoded 75 (which previously made
+    # `trading.min_score_threshold` a dead knob).
+    threshold: float = 75.0
+
     @property
     def is_tradeable(self) -> bool:
         return (
             self.direction == "long"
-            and self.total_score >= 75
+            and self.total_score >= self.threshold
             and self.regime == Regime.TRENDING
         )
 
@@ -71,6 +76,11 @@ class SpotScorer:
     def __init__(self, cfg: dict):
         self._cfg = cfg
         self._weights: dict[str, float] = dict(cfg["scoring"]["weights"])
+        # Honour `trading.min_score_threshold` instead of the previous
+        # hardcoded 75 floor in `is_tradeable`.
+        self._min_score_threshold: float = float(
+            cfg.get("trading", {}).get("min_score_threshold", 70.0) or 70.0
+        )
 
     def update_weights(self, weights: dict[str, float]) -> None:
         self._weights = {k: float(v) for k, v in weights.items()}
@@ -119,6 +129,7 @@ class SpotScorer:
                 btc_correlation=0.0,
                 volatility_condition=0.0,
                 weights_used=dict(self._weights),
+                threshold=self._min_score_threshold,
             )
 
         # ── Direction (Spot = LONG only) ──────────────────────────────
@@ -167,6 +178,7 @@ class SpotScorer:
             btc_correlation=bc,
             volatility_condition=vc,
             weights_used=dict(w),
+            threshold=self._min_score_threshold,
         )
 
     def score_many(

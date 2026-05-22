@@ -356,6 +356,8 @@ class BacktestEngine:
         close: float,
         bar_idx: int,
     ) -> tuple[BacktestTrade, bool]:
+        # Use the configured trailing strategy: tp2_trailing_stop_pct keeps
+        # behaviour close to live's ATR-trailing.  We approximate with a pct.
         trail_pct = self._exit_cfg.get("tp2_trailing_stop_pct", 0.15)
 
         # Update MFE/MAE in R multiples before exit logic
@@ -369,19 +371,58 @@ class BacktestEngine:
             trade.mfe_r = max(trade.mfe_r, fav / trade.r_distance)
             trade.mae_r = max(trade.mae_r, adv / trade.r_distance)
 
-        # TP1 hit first on this bar
+        mult = 1 if trade.direction == "long" else -1
+
+        # ------------------------------------------------------------------
+        # Order-of-operations within a bar
+        # ------------------------------------------------------------------
+        # We process the bar in the same priority that live does:
+        #   1. SL hit  (worst case first to avoid optimistic bias)
+        #   2. Trailing stop hit
+        #   3. TP1 partial — only if not yet hit
+        #   4. TP2 partial — only after TP1
+        #   5. TP3 full close — only after TP2
+        # ------------------------------------------------------------------
+
+        # 1. SL hit (always closes the residual)
+        if trade.is_sl_hit(low, high):
+            close_pnl = mult * (trade.stop_loss - trade.entry_price) * trade.remaining_contracts
+            trade.pnl_usd += close_pnl
+            trade.exit_price = trade.stop_loss
+            trade.exit_reason = "stop_loss"
+            trade.exit_bar = bar_idx
+            return trade, True
+
+        # 2. Trailing stop hit (closes residual)
+        if trade.tp1_hit and trade.trailing_stop is not None:
+            ts_hit = (
+                (trade.direction == "long" and low <= trade.trailing_stop)
+                or (trade.direction == "short" and high >= trade.trailing_stop)
+            )
+            if ts_hit:
+                close_pnl = mult * (trade.trailing_stop - trade.entry_price) * trade.remaining_contracts
+                trade.pnl_usd += close_pnl
+                trade.exit_price = trade.trailing_stop
+                trade.exit_reason = "trailing_stop"
+                trade.exit_bar = bar_idx
+                return trade, True
+
+        # 3. TP1 partial (closes tp1_size_pct of original size)
         if not trade.tp1_hit and trade.is_tp1_hit(low, high):
-            tp1_pnl = abs(trade.tp1 - trade.entry_price) * (trade.size_contracts * trade.tp1_size_pct)
-            trade.pnl_usd = tp1_pnl if trade.direction == "long" else tp1_pnl
-            trade.remaining_contracts *= (1 - trade.tp1_size_pct)
-            trade.stop_loss = trade.entry_price   # move to breakeven
+            tp1_qty = trade.size_contracts * trade.tp1_size_pct
+            tp1_pnl = mult * (trade.tp1 - trade.entry_price) * tp1_qty
+            trade.pnl_usd += tp1_pnl
+            trade.remaining_contracts -= tp1_qty
             trade.tp1_hit = True
+            # Move SL to breakeven
+            trade.stop_loss = trade.entry_price
+            # Start trailing
             if trade.direction == "long":
                 trade.trailing_stop = trade.tp1 * (1 - trail_pct)
             else:
                 trade.trailing_stop = trade.tp1 * (1 + trail_pct)
 
-        # Update trailing stop
+        # 3b. Update trailing stop after TP1 (ratchet only)
         if trade.tp1_hit and trade.trailing_stop is not None:
             if trade.direction == "long":
                 new_trail = close * (1 - trail_pct)
@@ -392,36 +433,33 @@ class BacktestEngine:
                 if new_trail < trade.trailing_stop:
                     trade.trailing_stop = new_trail
 
-        # SL hit
-        if trade.is_sl_hit(low, high):
-            mult = 1 if trade.direction == "long" else -1
-            close_pnl = mult * (trade.stop_loss - trade.entry_price) * trade.remaining_contracts
-            trade.pnl_usd += close_pnl
-            trade.exit_price = trade.stop_loss
-            trade.exit_reason = "stop_loss"
-            trade.exit_bar = bar_idx
-            return trade, True
-
-        # Trailing stop hit
-        if trade.trailing_stop is not None:
-            ts_hit = (trade.direction == "long" and low <= trade.trailing_stop) or \
-                     (trade.direction == "short" and high >= trade.trailing_stop)
-            if ts_hit:
-                mult = 1 if trade.direction == "long" else -1
-                close_pnl = mult * (trade.trailing_stop - trade.entry_price) * trade.remaining_contracts
-                trade.pnl_usd += close_pnl
-                trade.exit_price = trade.trailing_stop
-                trade.exit_reason = "trailing_stop"
+        # 4. TP2 partial (closes tp2_size_pct of REMAINDER, matches live)
+        tp3 = trade.entry_price + mult * trade.r_distance * float(
+            self._exit_cfg.get("tp3_r_multiple", 3.0)
+        )
+        tp2_already_hit = getattr(trade, "_tp2_hit", False)
+        if trade.tp1_hit and not tp2_already_hit and trade.is_tp2_hit(low, high):
+            tp2_qty = trade.remaining_contracts * trade.tp2_size_pct
+            tp2_pnl = mult * (trade.tp2 - trade.entry_price) * tp2_qty
+            trade.pnl_usd += tp2_pnl
+            trade.remaining_contracts -= tp2_qty
+            setattr(trade, "_tp2_hit", True)
+            if trade.remaining_contracts <= 1e-9:
+                trade.exit_price = trade.tp2
+                trade.exit_reason = "tp2_full"
                 trade.exit_bar = bar_idx
                 return trade, True
 
-        # TP2 hit
-        if trade.is_tp2_hit(low, high):
-            mult = 1 if trade.direction == "long" else -1
-            close_pnl = mult * (trade.tp2 - trade.entry_price) * trade.remaining_contracts
+        # 5. TP3 closes the rest of the runner
+        tp3_hit = (
+            (trade.direction == "long" and high >= tp3)
+            or (trade.direction == "short" and low <= tp3)
+        )
+        if getattr(trade, "_tp2_hit", False) and tp3_hit and trade.remaining_contracts > 0:
+            close_pnl = mult * (tp3 - trade.entry_price) * trade.remaining_contracts
             trade.pnl_usd += close_pnl
-            trade.exit_price = trade.tp2
-            trade.exit_reason = "tp2"
+            trade.exit_price = tp3
+            trade.exit_reason = "tp3"
             trade.exit_bar = bar_idx
             return trade, True
 

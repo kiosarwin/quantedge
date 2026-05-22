@@ -11,26 +11,29 @@ exchange:
   recv_window: 10000
 
 trading:
-  mode: live                      # paper | live | backtest
+  mode: paper                      # paper | live | backtest  (was 'live' — defaulting to paper for safety)
   base_currency: USDT
-  min_score_threshold: 67          # ONLY trade if score ≥ 75
-  max_open_trades: 3               # Maximum concurrent positions
-  top_pairs_to_trade: 2            # Enter at most N new trades per scan
+  # ── AGGRESSIVE-EDGE TUNING ──────────────────────────────────────────────
+  # The hardcoded 75 floor in SpotScorer.is_tradeable was removed; this
+  # threshold is now actually enforced.
+  min_score_threshold: 68          # Slightly stricter than the old dead 67 to compensate for the wider sleeve
+  max_open_trades: 4               # Was 3 — wider diversification across alts
+  top_pairs_to_trade: 3            # Was 2 — open up to 3 fresh entries per cycle
   scan_interval_seconds: 300       # 5-minute scan cycle
   candle_refresh_seconds: 60
 
 # ── Capital Allocation (Spot — no leverage) ───────────────────
 capital:
   total_usdt: 1000.0               # Starting capital (paper / seed)
-  min_position_pct: 10             # Minimum 10% of equity per trade
-  max_position_pct: 25             # Maximum 25% of equity per trade
+  min_position_pct: 12             # Was 10 — bump per-trade allocation
+  max_position_pct: 30             # Was 25 — let high-RR setups deploy more
 
 # ── Risk Management ───────────────────────────────────────────
 risk:
-  daily_loss_cap_pct: 5.0          # Halt new entries if -5% on the day
-  max_drawdown_pct: 12.0           # Halt if equity drops 12% from peak
+  daily_loss_cap_pct: 6.0          # Was 5.0 — small extra room offset by per-trade controls
+  max_drawdown_pct: 15.0           # Was 12.0 — give the bot air to mean-revert during dd
   min_rr_ratio: 2.0                # Minimum R:R — skip setups below this
-  max_consecutive_losses: 4        # Pause after 4 straight losses
+  max_consecutive_losses: 5        # Was 4 — pause after 5 straight losses (avoids over-eager halt)
 
 # ── Exit Strategy ─────────────────────────────────────────────
 exit:
@@ -98,8 +101,8 @@ regime:
 btc:
   safety_enabled: true
   symbol: "BTC/USDT"               # BTC spot symbol
-  dump_threshold_4h_pct: -3.0      # BTC down -3% in 4H → halt altcoin entries
-  recovery_threshold_pct: 1.5      # BTC recovers +1.5% from low → re-enable
+  dump_threshold_4h_pct: -3.5      # Was -3.0 — slightly more tolerance for routine BTC dips
+  recovery_threshold_pct: 1.2      # Was 1.5 — re-enable trading sooner once BTC stabilises
   ema_period: 50                   # BTC EMA for trend bias
   below_ema_halt: true             # Halt if BTC price < EMA50
 
@@ -110,7 +113,7 @@ entry:
     - "pullback_ema"               # Uptrend → retrace to EMA50 → bullish reaction
     - "liquidity_sweep"            # Fake breakdown → strong recovery → enter long
   require_volume_confirmation: true
-  min_volume_ratio: 1.5            # Volume must be 1.5× average at entry
+  min_volume_ratio: 1.4            # Was 1.5 — slightly looser to catch healthy participation
 
 # ── Scoring Weights (must sum to 100) ─────────────────────────
 scoring:

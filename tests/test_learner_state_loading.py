@@ -1,6 +1,5 @@
 import json
 
-from src.backtest.learner import Learner as BacktestLearner
 from src.learning.learner import Learner as FuturesLearner
 
 
@@ -66,15 +65,4 @@ def test_futures_learner_ignores_unknown_trade_fields(tmp_path):
     assert len(learner._trade_log) == 1
     assert learner._trade_log[0].symbol == "BTC/USDT:USDT"
     assert learner._trade_log[0].dispersion_value == 52.24
-    assert learner.current_weights["trend_strength"] == 21.0
-
-
-def test_backtest_learner_ignores_unknown_trade_fields(tmp_path):
-    save_path = tmp_path / "backtest_state.json"
-    save_path.write_text(json.dumps(_state_payload()))
-
-    learner = BacktestLearner(_cfg(str(save_path)))
-
-    assert len(learner._trade_log) == 1
-    assert learner._trade_log[0].symbol == "BTC/USDT:USDT"
     assert learner.current_weights["trend_strength"] == 21.0

@@ -80,9 +80,12 @@ class KellySizer:
             return _zero_result("Zero stop distance")
 
         # ── Kelly fraction ────────────────────────────────────────────
-        # ev.kelly_fraction is already quarter-Kelly (raw * 0.25 in ev_model).
-        # Recover the true raw Kelly, then apply our configured fraction.
-        kelly_raw = ev.kelly_fraction / 0.25  # ev_model always stores raw*0.25
+        # Prefer ev.kelly_raw when EVModel publishes it (decoupling from the
+        # previous hard-coded `× 0.25` convention).  Fall back to the legacy
+        # path so older state files still work.
+        kelly_raw = float(getattr(ev, "kelly_raw", 0.0) or 0.0)
+        if kelly_raw <= 0 and ev.kelly_fraction > 0:
+            kelly_raw = ev.kelly_fraction / 0.25
         fractional_kelly = kelly_raw * self._fraction
 
         # ── Volatility scalar ─────────────────────────────────────────
