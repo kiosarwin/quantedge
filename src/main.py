@@ -39,6 +39,7 @@ from src.models.ml_engine import MLPredictor, LiveReadiness
 from src.models.fund_manager import FundManager
 from src.models.cohort_policy import CohortPolicy
 from src.models.strategy_lifecycle import StrategyLifecycleManager
+from src.models.adaptive_brain import AdaptiveBrain
 from src.risk.correlation_filter import CorrelationFilter
 from src.risk.session_modulator import SessionModulator
 from src.data.dataset_logger import DatasetLogger
@@ -178,6 +179,8 @@ class NinjaTrader:
         self._fund_mgr = FundManager(cfg, telegram_notifier=self._telegram, exploration_mode=self._exploration)
         self._cohort_policy = CohortPolicy(cfg)
         self._lifecycle = StrategyLifecycleManager(cfg)
+        # Adaptive AI Brain — Thompson bandit + online ML + regime HMM + alpha decay + vol target
+        self._brain = AdaptiveBrain(cfg)
         self._session_mod = SessionModulator(cfg)
         self._corr_filter = CorrelationFilter(cfg)
         self._paper_validation = cfg.get("paper_validation", {})
@@ -1118,6 +1121,29 @@ class NinjaTrader:
                     total_scale = min(ml_scale * ml_confidence * fm_decision.size_multiplier, 2.0)
                     total_scale = max(total_scale, 0.40)
                     total_scale *= getattr(bd, "strategy_size_mult", 1.0)
+
+                    # ── Adaptive Brain layer (Thompson + ML + regime HMM + alpha decay + vol target) ──
+                    brain_decision = self._brain.decide(bd)
+                    if brain_decision.should_block:
+                        log.warning(
+                            "[%s] BRAIN BLOCKED — %s",
+                            bd.symbol, brain_decision.telegram_summary(),
+                        )
+                        self._rej.log(
+                            stage="brain_block",
+                            reason=f"alpha decayed: {brain_decision.telegram_summary()}",
+                            breakdown=bd, threshold_required=_bd_thresh,
+                            fm_scale=total_scale, ml_p_win=_p_win,
+                            funding_rate=_bd_fr,
+                        )
+                        if self._shadow:
+                            self._shadow.record_rejected(bd, stage="brain_block")
+                        continue
+                    total_scale *= brain_decision.overall_size_mult
+                    log.info(
+                        "[%s] 🧠 Brain: %s",
+                        bd.symbol, brain_decision.telegram_summary(),
+                    )
                     if getattr(bd, "strategy_size_mult", 1.0) != 1.0:
                         log.info(
                             "[%s] strategy_scale=%.2fx applied (%s)",
@@ -1388,6 +1414,11 @@ class NinjaTrader:
             float(self._risk.state.daily_pnl_pct or 0.0),
             int(self._risk.state.open_trade_count or 0),
         )
+        # Feed daily return into adaptive brain's vol targeter (throttled internally)
+        try:
+            self._brain.record_daily_return(float(self._risk.state.daily_pnl_pct or 0.0))
+        except Exception as _exc:
+            log.debug("Brain daily return record failed: %s", _exc)
 
     async def _on_trade_closed(self, trade: OpenTrade, pnl: float, reason: str) -> None:
         scores = self._pending_scores.pop(trade.symbol, {})
@@ -1443,6 +1474,31 @@ class NinjaTrader:
             lifecycle_status=str(scores.get("lifecycle_status", "RESEARCH")),
         )
         self._learner.record_trade(record)
+
+        # ── Adaptive Brain learning — feeds outcome to Thompson, ML, alpha decay ──
+        try:
+            # Reconstruct a minimal breakdown-like object from the closed-trade record
+            # so the brain can extract features it saw at entry time
+            brain_features = type("BrainBreakdown", (), {
+                "symbol": trade.symbol,
+                "direction": trade.direction,
+                "total_score": float(scores.get("score", 50.0)),
+                "structure_quality": float(scores.get("structure_quality", 50.0)),
+                "trend_strength": float(scores.get("trend_strength", 50.0)),
+                "volume_confirmation": float(scores.get("volume_confirmation", 50.0)),
+                "funding_sentiment": float(scores.get("funding_sentiment", 50.0)),
+                "open_interest": float(scores.get("open_interest", 50.0)),
+                "volatility": float(scores.get("volatility", 50.0)),
+                "regime": type("R", (), {"value": _regime_str})(),
+                "smart_money": None,
+                "feature_vector": type("FV", (), {
+                    "momentum_strength": float(scores.get("momentum_strength", 0.0)),
+                })(),
+                "strategy_sleeve": str(scores.get("strategy_sleeve", "neutral")),
+            })()
+            self._brain.learn(brain_features, won=(pnl > 0), pnl_pct=pnl_pct)
+        except Exception as _exc:
+            log.debug("Brain learn failed: %s", _exc)
         # Feed closed outcome into EdgeDetector memory (pair × edge_type → per-regime WR + decay curve).
         try:
             _sm_phase = str(scores.get("sm_phase", "neutral"))
