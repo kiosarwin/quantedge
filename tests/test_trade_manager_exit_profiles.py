@@ -9,6 +9,7 @@ from src.risk.risk_manager import TradeSetup
 class _FakeExecutor:
     def __init__(self):
         self.take_profit_calls = []
+        self.move_stop_calls = []
 
     async def open_position(self, setup):
         return {"id": "entry-1", "price": setup.entry_price}
@@ -19,6 +20,21 @@ class _FakeExecutor:
     async def place_take_profit(self, setup, price, size_pct):
         self.take_profit_calls.append((price, size_pct))
         return {"id": f"tp-{len(self.take_profit_calls)}"}
+
+    async def move_stop_loss(self, symbol, direction, old_sl_id, new_stop_price, size_contracts):
+        # Mirror the live executor: cancel old SL and emit a fresh order id.
+        self.move_stop_calls.append({
+            "symbol": symbol,
+            "direction": direction,
+            "old_sl_id": old_sl_id,
+            "new_stop_price": new_stop_price,
+            "size_contracts": size_contracts,
+        })
+        return {
+            "id": f"sl-be-{len(self.move_stop_calls)}",
+            "stopPrice": new_stop_price,
+            "status": "NEW",
+        }
 
     async def cancel_all(self, symbol):
         return None
@@ -81,6 +97,123 @@ def test_trade_manager_uses_sleeve_specific_exit_profile(monkeypatch, tmp_path):
     assert trade.remaining_contracts == pytest.approx(0.60)
     assert trade.setup.stop_loss == pytest.approx(100.0)
     assert trade.trailing_stop == pytest.approx(100.2)
+
+
+def test_trade_manager_tp1_refreshes_exchange_sl_to_breakeven(monkeypatch, tmp_path):
+    """After TP1 partial fill, the exchange-side SL must be replaced.
+
+    Historically the bot only updated the *local* trade.setup.stop_loss
+    field; the reduceOnly stop on Binance still triggered at the
+    original (wider) SL price, so an offline bot could leak the
+    residual at the old stop instead of the configured break-even.
+    """
+    cfg = {"exit": {}, "ev_model": {}}
+    executor = _FakeExecutor()
+    risk = _FakeRisk()
+    monkeypatch.setattr(TradeManager, "STATE_PATH", tmp_path / "open_trades.json")
+    manager = TradeManager(client=object(), executor=executor, risk=risk, cfg=cfg)
+
+    setup = TradeSetup(
+        symbol="SOL/USDT:USDT",
+        direction="long",
+        entry_price=100.0,
+        stop_loss=95.0,
+        tp1=103.0,
+        tp2=106.0,
+        tp3=110.0,
+        size_usd=100.0,
+        size_contracts=1.0,
+        leverage=5,
+        r_distance=5.0,
+        strategy_sleeve="default",
+        atr=2.0,
+        risk_pct=1.0,
+        exit_profile="default",
+        tp1_size_pct=0.50,
+        tp2_size_pct=0.30,
+        trail_size_pct=0.20,
+        breakeven_trigger_r=1.0,
+        trailing_atr_multiplier=1.5,
+        max_hold_duration_s=9999,
+    )
+
+    trade = asyncio.run(manager.open(setup))
+    assert trade is not None
+    assert trade.sl_order_id == "sl-1"
+
+    asyncio.run(manager._check_exits(trade, 103.0))
+
+    # Local invariants — still hold
+    assert trade.tp1_hit is True
+    assert trade.setup.stop_loss == pytest.approx(100.0)
+
+    # Exchange SL replacement was issued exactly once with:
+    #   - the OLD sl id we placed at trade open
+    #   - the residual (post-TP1) contract count, not the original
+    #   - the new stop price = entry (break-even)
+    assert len(executor.move_stop_calls) == 1
+    call = executor.move_stop_calls[0]
+    assert call["symbol"] == "SOL/USDT:USDT"
+    assert call["direction"] == "long"
+    assert call["old_sl_id"] == "sl-1"
+    assert call["new_stop_price"] == pytest.approx(100.0)
+    assert call["size_contracts"] == pytest.approx(0.50)
+
+    # Local sl_order_id now tracks the fresh SL on the exchange.
+    assert trade.sl_order_id == "sl-be-1"
+
+
+def test_trade_manager_tp1_tolerates_move_stop_loss_failure(monkeypatch, tmp_path):
+    """If the SL refresh blows up (network glitch, Binance rejection),
+    the trade must NOT crash — the local stop_loss is still authoritative
+    on the next tick and the bot will market-close if the local SL is
+    breached."""
+    cfg = {"exit": {}, "ev_model": {}}
+    risk = _FakeRisk()
+
+    class _BrokenExecutor(_FakeExecutor):
+        async def move_stop_loss(self, *args, **kwargs):
+            raise RuntimeError("simulated exchange outage")
+
+    executor = _BrokenExecutor()
+    monkeypatch.setattr(TradeManager, "STATE_PATH", tmp_path / "open_trades.json")
+    manager = TradeManager(client=object(), executor=executor, risk=risk, cfg=cfg)
+
+    setup = TradeSetup(
+        symbol="SOL/USDT:USDT",
+        direction="long",
+        entry_price=100.0,
+        stop_loss=95.0,
+        tp1=103.0,
+        tp2=106.0,
+        tp3=110.0,
+        size_usd=100.0,
+        size_contracts=1.0,
+        leverage=5,
+        r_distance=5.0,
+        strategy_sleeve="default",
+        atr=2.0,
+        risk_pct=1.0,
+        exit_profile="default",
+        tp1_size_pct=0.50,
+        tp2_size_pct=0.30,
+        trail_size_pct=0.20,
+        breakeven_trigger_r=1.0,
+        trailing_atr_multiplier=1.5,
+        max_hold_duration_s=9999,
+    )
+
+    trade = asyncio.run(manager.open(setup))
+    assert trade is not None
+
+    # Should not raise even though move_stop_loss explodes.
+    asyncio.run(manager._check_exits(trade, 103.0))
+    assert trade.tp1_hit is True
+    assert trade.setup.stop_loss == pytest.approx(100.0)
+    assert trade.symbol in manager.open_symbols
+    # Local sl_order_id stays on the original SL — caller should treat
+    # the exchange SL as stale (this is the documented degraded mode).
+    assert trade.sl_order_id == "sl-1"
 
 
 def test_trade_manager_tp2_closes_pct_of_original_size(monkeypatch, tmp_path):

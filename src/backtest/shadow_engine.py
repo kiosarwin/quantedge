@@ -128,6 +128,7 @@ class ShadowEngine:
             tp2_size_pct=setup.tp2_size_pct,
             trailing_atr_multiplier=setup.trailing_atr_multiplier,
             max_hold_duration_s=setup.max_hold_duration_s,
+            atr=float(setup.atr or 0.0),
             remaining_contracts=setup.size_contracts,
         )
         self._open[sym] = trade
@@ -285,6 +286,7 @@ class ShadowEngine:
                 trade_payload.setdefault("tp2_size_pct", 0.30)
                 trade_payload.setdefault("trailing_atr_multiplier", 1.5)
                 trade_payload.setdefault("max_hold_duration_s", 172800)
+                trade_payload.setdefault("atr", 0.0)
                 self._open[sym] = BacktestTrade(**trade_payload)
                 self._open_meta[sym] = entry["meta"]
             self._equity = state.get("equity", self._initial_equity)
@@ -457,6 +459,11 @@ class ShadowEngine:
         bar_idx: int,
     ) -> tuple[BacktestTrade, bool]:
         ec = self._exit_cfg
+        # ATR-based trail mirrors live; falls back to %-based when ATR
+        # was not captured at entry (older shadow_state.json snapshots).
+        atr_mult = float(trade.trailing_atr_multiplier or 0.0)
+        trail_dist = float(trade.atr or 0.0) * atr_mult
+        atr_mode = trail_dist > 0.0
         trail_pct = ec.get("tp2_trailing_stop_pct", 0.15)
         mult = 1 if trade.direction == "long" else -1
 
@@ -496,21 +503,37 @@ class ShadowEngine:
             trade.remaining_contracts -= tp1_qty
             trade.tp1_hit = True
             trade.stop_loss = trade.entry_price
-            if trade.direction == "long":
-                trade.trailing_stop = trade.tp1 * (1 - trail_pct)
+            if atr_mode:
+                if trade.direction == "long":
+                    trade.trailing_stop = trade.tp1 - trail_dist
+                else:
+                    trade.trailing_stop = trade.tp1 + trail_dist
             else:
-                trade.trailing_stop = trade.tp1 * (1 + trail_pct)
+                if trade.direction == "long":
+                    trade.trailing_stop = trade.tp1 * (1 - trail_pct)
+                else:
+                    trade.trailing_stop = trade.tp1 * (1 + trail_pct)
 
-        # 3b. Ratchet trailing
+        # 3b. Ratchet trailing (never widen)
         if trade.tp1_hit and trade.trailing_stop is not None:
-            if trade.direction == "long":
-                new_trail = close * (1 - trail_pct)
-                if new_trail > trade.trailing_stop:
-                    trade.trailing_stop = new_trail
+            if atr_mode:
+                if trade.direction == "long":
+                    new_trail = close - trail_dist
+                    if new_trail > trade.trailing_stop:
+                        trade.trailing_stop = new_trail
+                else:
+                    new_trail = close + trail_dist
+                    if new_trail < trade.trailing_stop:
+                        trade.trailing_stop = new_trail
             else:
-                new_trail = close * (1 + trail_pct)
-                if new_trail < trade.trailing_stop:
-                    trade.trailing_stop = new_trail
+                if trade.direction == "long":
+                    new_trail = close * (1 - trail_pct)
+                    if new_trail > trade.trailing_stop:
+                        trade.trailing_stop = new_trail
+                else:
+                    new_trail = close * (1 + trail_pct)
+                    if new_trail < trade.trailing_stop:
+                        trade.trailing_stop = new_trail
 
         # 4. TP2 partial (closes tp2_size_pct of ORIGINAL position; runner
         #    is left to trail to TP3, matching live + backtest engine).

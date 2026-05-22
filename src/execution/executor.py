@@ -88,6 +88,95 @@ class Executor:
         log.info("SL order placed: %s @ %.4f", order.get("id"), setup.stop_loss)
         return order
 
+    async def move_stop_loss(
+        self,
+        symbol: str,
+        direction: str,
+        old_sl_id: str,
+        new_stop_price: float,
+        size_contracts: float,
+    ) -> dict | None:
+        """Cancel the existing SL and place a fresh one at ``new_stop_price``.
+
+        Used by ``TradeManager`` after a TP1 partial fill to anchor the
+        residual to break-even on the *exchange* — not just locally — so
+        an offline bot cannot bleed the residual at the original wider
+        stop.  Returns the new order dict on success, or ``None`` if the
+        replacement could not be placed; in either case the caller should
+        treat ``None`` / a missing id as "exchange SL is now stale" and
+        rely on the local stop_loss field.
+
+        Failure modes tolerated:
+          * old SL already filled / cancelled — proceed to place new SL
+          * new SL rejected by exchange — log critical and return None
+            (the local SL still triggers via market close on next tick)
+
+        Paper mode short-circuits to a synthetic order id so unit tests
+        and dry-runs work the same way.
+        """
+        if self._paper:
+            return {
+                "id": _next_paper_id(),
+                "type": "stop_market",
+                "stopPrice": new_stop_price,
+            }
+
+        # Step 1: cancel the old SL.  We swallow "already cancelled / filled"
+        # errors because that's exactly the race we're trying to be robust
+        # against — never let stale exchange state block placing the new
+        # protective stop.
+        if old_sl_id:
+            try:
+                await self._client.cancel_order(old_sl_id, symbol)
+            except Exception as exc:
+                log.warning(
+                    "[%s] move_stop_loss: cancel of old SL %s failed (probably already gone): %s",
+                    symbol, old_sl_id, exc,
+                )
+
+        # Step 2: place the new reduceOnly SL sized to the residual.
+        side = "sell" if direction == "long" else "buy"
+        amount = self._round_amount(symbol, size_contracts)
+        if amount <= 0:
+            log.warning(
+                "[%s] move_stop_loss: residual size %.6f rounds to zero — "
+                "no exchange SL refresh (local stop still active)",
+                symbol, size_contracts,
+            )
+            return None
+
+        sl_price = self._round_price(symbol, new_stop_price)
+        params = {
+            "stopPrice": sl_price,
+            "reduceOnly": True,
+            "closePosition": False,
+        }
+        try:
+            order = await self._client.create_order(
+                symbol, "stop_market", side, amount, params=params
+            )
+        except Exception as exc:
+            log.critical(
+                "[%s] move_stop_loss: failed to place new SL @ %.4f for %.6f contracts — "
+                "exchange SL is now MISSING; relying on local stop. err=%s",
+                symbol, sl_price, amount, exc,
+            )
+            return None
+
+        status = order.get("status", "")
+        if status not in ("NEW", "PARTIALLY_FILLED", "open", "new"):
+            log.critical(
+                "[%s] move_stop_loss: new SL rejected by exchange — status=%r",
+                symbol, status,
+            )
+            return None
+
+        log.info(
+            "[%s] SL moved on exchange: %s @ %.4f (size %.6f)",
+            symbol, order.get("id"), sl_price, amount,
+        )
+        return order
+
     async def place_take_profit(
         self, setup: TradeSetup, tp_price: float, size_pct: float
     ) -> dict:

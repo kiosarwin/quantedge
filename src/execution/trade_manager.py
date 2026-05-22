@@ -310,6 +310,26 @@ class TradeManager:
                 trade.trailing_stop = price - trail_dist
             else:
                 trade.trailing_stop = price + trail_dist
+            # Refresh the exchange-side SL to break-even on the residual.
+            # If the bot dies between TP1 and TP2/SL, the residual is now
+            # protected at BE on the exchange instead of the original
+            # (wider) SL price.  Failures are non-fatal: local stop_loss
+            # still drives the live close path on the next tick.
+            try:
+                new_sl = await self._executor.move_stop_loss(
+                    symbol=trade.symbol,
+                    direction=trade.direction,
+                    old_sl_id=trade.sl_order_id,
+                    new_stop_price=trade.setup.entry_price,
+                    size_contracts=trade.remaining_contracts,
+                )
+                if new_sl and new_sl.get("id"):
+                    trade.sl_order_id = new_sl["id"]
+            except Exception as exc:
+                log.warning(
+                    "[%s] move_stop_loss raised — continuing with local stop only: %s",
+                    trade.symbol, exc,
+                )
             if self._on_progress:
                 await self._on_progress(trade, "tp1", price)
             self._save_state()

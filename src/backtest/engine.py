@@ -45,6 +45,14 @@ class BacktestTrade:
     tp2_size_pct: float
     trailing_atr_multiplier: float
     max_hold_duration_s: int
+    # Snapshot of the symbol's ATR at trade-entry time. Used by the
+    # backtest exit logic to mirror live's ATR-based trailing stop:
+    # ``trail_dist = atr * trailing_atr_multiplier`` is constant for
+    # the life of the trade, only the ratchet target moves with price.
+    # Defaults to 0.0 so legacy serialized trades (engine state, shadow
+    # state) load cleanly; the backtest then falls back to the legacy
+    # %-based trail.
+    atr: float = 0.0
     exit_bar: int = 0
     exit_price: float = 0.0
     exit_reason: str = ""
@@ -245,6 +253,7 @@ class BacktestEngine:
                             tp2_size_pct=setup.tp2_size_pct,
                             trailing_atr_multiplier=setup.trailing_atr_multiplier,
                             max_hold_duration_s=setup.max_hold_duration_s,
+                            atr=float(setup.atr or 0.0),
                             remaining_contracts=setup.size_contracts,
                             entry_score=bd.total_score,
                         )
@@ -362,8 +371,15 @@ class BacktestEngine:
         close: float,
         bar_idx: int,
     ) -> tuple[BacktestTrade, bool]:
-        # Use the configured trailing strategy: tp2_trailing_stop_pct keeps
-        # behaviour close to live's ATR-trailing.  We approximate with a pct.
+        # ATR-based trailing mirrors live behaviour: ``trail_dist =
+        # atr * trailing_atr_multiplier`` is fixed at entry, only the
+        # ratchet target moves with price. Falls back to the legacy
+        # %-based trail (``tp2_trailing_stop_pct``) when ATR isn't
+        # known — keeps backwards compatibility with older state
+        # snapshots and shadow trades that didn't capture ATR.
+        atr_mult = float(trade.trailing_atr_multiplier or 0.0)
+        trail_dist = float(trade.atr or 0.0) * atr_mult
+        atr_mode = trail_dist > 0.0
         trail_pct = self._exit_cfg.get("tp2_trailing_stop_pct", 0.15)
 
         # Update MFE/MAE in R multiples before exit logic
@@ -422,22 +438,42 @@ class BacktestEngine:
             trade.tp1_hit = True
             # Move SL to breakeven
             trade.stop_loss = trade.entry_price
-            # Start trailing
-            if trade.direction == "long":
-                trade.trailing_stop = trade.tp1 * (1 - trail_pct)
+            # Initial trailing stop — at the TP1 fill price minus
+            # (or plus) the trail distance, mirroring live.
+            if atr_mode:
+                if trade.direction == "long":
+                    trade.trailing_stop = trade.tp1 - trail_dist
+                else:
+                    trade.trailing_stop = trade.tp1 + trail_dist
             else:
-                trade.trailing_stop = trade.tp1 * (1 + trail_pct)
+                if trade.direction == "long":
+                    trade.trailing_stop = trade.tp1 * (1 - trail_pct)
+                else:
+                    trade.trailing_stop = trade.tp1 * (1 + trail_pct)
 
-        # 3b. Update trailing stop after TP1 (ratchet only)
+        # 3b. Update trailing stop after TP1 (ratchet only — never widen).
+        # Live recomputes trail_dist from the (constant) entry-time ATR
+        # and the current tick price; backtest does the same with the
+        # bar close as a tick proxy.
         if trade.tp1_hit and trade.trailing_stop is not None:
-            if trade.direction == "long":
-                new_trail = close * (1 - trail_pct)
-                if new_trail > trade.trailing_stop:
-                    trade.trailing_stop = new_trail
+            if atr_mode:
+                if trade.direction == "long":
+                    new_trail = close - trail_dist
+                    if new_trail > trade.trailing_stop:
+                        trade.trailing_stop = new_trail
+                else:
+                    new_trail = close + trail_dist
+                    if new_trail < trade.trailing_stop:
+                        trade.trailing_stop = new_trail
             else:
-                new_trail = close * (1 + trail_pct)
-                if new_trail < trade.trailing_stop:
-                    trade.trailing_stop = new_trail
+                if trade.direction == "long":
+                    new_trail = close * (1 - trail_pct)
+                    if new_trail > trade.trailing_stop:
+                        trade.trailing_stop = new_trail
+                else:
+                    new_trail = close * (1 + trail_pct)
+                    if new_trail < trade.trailing_stop:
+                        trade.trailing_stop = new_trail
 
         # 4. TP2 partial — closes tp2_size_pct of ORIGINAL position (matches
         #    live + exchange-placed reduceOnly TP order). Earlier versions
