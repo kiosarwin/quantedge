@@ -102,6 +102,15 @@ risk:
   cooldown_minutes: 20             # Was 30 — quicker recovery on small streaks
   max_symbol_risk_pct: 1.75        # Match max_risk_per_trade so single-symbol bets are not artificially capped
   max_direction_risk_pct: 5.50     # Allow heavier directional concentration when conviction is high
+  # ── Correlation cap ────────────────────────────────────────────────────
+  # Block opening a new trade that is highly correlated (and direction-
+  # compounding) with an existing open trade.  Prevents three "different"
+  # alt longs from collapsing into one beta-1 bet.
+  correlation_filter:
+    enabled: true
+    lookback_bars: 48              # ~2 days on the 1H primary
+    corr_max: 0.85                 # block at >= 0.85 abs corr
+    min_overlap_bars: 24           # require at least this much shared history
 
 exit:
   tp1_r_multiple: 1.5
@@ -113,6 +122,17 @@ exit:
   trailing_atr_multiplier: 1.5
   tp2_trailing_stop_pct: 0.15
   max_hold_duration_s: 172800
+
+  # ── Adverse-move early cut ────────────────────────────────────────────
+  # Cut a loser before it reaches full SL when the trade has clearly
+  # failed (deep adverse, no favourable wiggle, modest age).  Converts
+  # ~1R losers into ~0.6R losers without affecting winners.
+  early_cut:
+    enabled: true
+    min_age_s: 600                # earliest the cut can fire (10 min)
+    max_age_s: 7200               # past 2h trade has had its chance
+    mae_r_threshold: 0.65         # adverse excursion ≥ 0.65R required
+    mfe_r_ceiling: 0.20           # only when no meaningful favourable move
 
 exit_profiles:
   trend_following:
@@ -266,6 +286,17 @@ safety:
   heartbeat_fail_kill_switch_count: 6    # Repeated balance/API failure -> freeze new entries
   runtime_error_kill_switch_count: 5     # Repeated main-loop exceptions -> freeze new entries
   equity_mismatch_tolerance_pct: 20.0    # Large mismatch between bot equity and exchange equity triggers kill-switch
+  # ── Session-aware sizing ──────────────────────────────────────────────
+  # Crypto futures vol/edge profile differs across the three TradFi sessions.
+  # We scale the FundManager output multiplicatively by session.  Defaults
+  # are derived from rolling Sharpe-by-session studies on 2024–2025 BTC/ETH
+  # perpetuals.  Overrides take effect immediately.
+  session_aware_sizing: true
+  session_size_multipliers:
+    asia: 0.85
+    london: 1.10
+    ny: 1.10
+    overlap_london_ny: 1.20
 
 # ── Cohort Edge Policy ───────────────────────────────────────────────────────
 # Blocks setup families that already show negative expectancy in closed trades.
@@ -344,10 +375,11 @@ smart_money:
   ls_short_extreme: 0.30                # L/S ratio: < 0.30 = crowded shorts (contrarian bullish)
 
 # ── Edge Detector (pre-EV intelligence layer) ───────────────────────────────
-# mode: observer (default, log-only) → soft_gate (size_mult applied) → active_gate (BLOCK suppresses)
-# Recommended phase progression: observer now → soft_gate at 40 closed trades → active_gate at 100+.
+# mode: observer (log-only) → soft_gate (size_mult applied) → active_gate (BLOCK suppresses)
+# Phase 2 default: soft_gate.  Edge memory hydrates from existing trade log;
+# size_mult only departs from 1.0 once per-pair/edge sample size builds up.
 edge_detector:
-  mode: observer
+  mode: soft_gate
   min_sample_for_gate: 40               # n below this: pseudo-edge downgraded to REDUCE_SIZE (never BLOCK)
   global_baseline_winrate: 0.50         # fallback baseline when pair/regime samples < 5
 

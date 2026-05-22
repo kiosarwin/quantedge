@@ -33,6 +33,7 @@ class CohortDecision:
     cohort_key: str = ""
     threshold_relief: float = 0.0          # negative = relief (lowers thresh)
     ranking_bonus: float = 0.0
+    size_mult: float = 1.0                 # multiplier applied on top of FM/Kelly
     attribution_match: dict | None = None  # the row that matched, if any
 
 
@@ -152,12 +153,14 @@ class CohortPolicy:
 
         relief = self._attribution_relief(breakdown, attribution_report)
         bonus = self._attribution_bonus(breakdown, attribution_report)
+        size_mult = self._attribution_size_mult(breakdown, attribution_report)
         return CohortDecision(
             True,
             "ok",
             cohort_key=cohort_key,
             threshold_relief=relief,
             ranking_bonus=bonus,
+            size_mult=size_mult,
             attribution_match=attr_match,
         )
 
@@ -283,3 +286,30 @@ class CohortPolicy:
             scale = min(1.0, max(0.0, (pf - self._attr_relief_pf) / 1.5))
             return round(self._max_ranking_bonus * (0.5 + 0.5 * scale), 2)
         return 0.0
+
+    def _attribution_size_mult(self, breakdown, report) -> float:
+        """Modest size scaling driven by realised cohort performance.
+
+        Range is bounded [0.6, 1.25] so it can never overpower hard risk
+        caps; the floor still triggers on healthy-but-weakening cohorts.
+        """
+        row = self._best_attribution_match(breakdown, report)
+        if not row or int(row.get("trades", 0)) < self._attr_min_trades:
+            return 1.0
+        pf = float(row.get("profit_factor", 0.0) or 0.0)
+        wr = float(row.get("win_rate", 0.0) or 0.0)
+        exp = float(row.get("expectancy_usd", 0.0) or 0.0)
+        # Strong cohort -> +up to 25%
+        if pf >= self._attr_relief_pf and wr >= self._attr_relief_wr and exp > 0:
+            scale = min(1.0, max(0.0, (pf - self._attr_relief_pf) / 1.5))
+            return round(1.0 + 0.25 * scale, 3)
+        # Weak cohort -> -up to 40%
+        if pf <= self._attr_block_pf or wr <= self._attr_block_wr or exp < 0:
+            shortfall = max(
+                self._attr_block_pf - pf,
+                (self._attr_block_wr - wr) * 2,
+                0.0,
+            )
+            scale = min(1.0, shortfall / 0.4)
+            return round(max(0.6, 1.0 - 0.4 * scale), 3)
+        return 1.0

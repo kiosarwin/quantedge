@@ -73,7 +73,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 
 ## Project: Ninja Trader
 
-Automated Binance Futures (USDT-margined perpetual) trading bot in Python. A spot edition lives in `src/spot_main.py`. `watchdog.py` runs alongside to auto-restart on crashes or hangs.
+Automated Binance Futures (USDT-margined perpetual) trading bot in Python.
+`watchdog.py` runs alongside to auto-restart on crashes or hangs.
 
 ### Setup
 
@@ -98,9 +99,6 @@ python -m src
 
 # Live trading
 python -m src --mode live --no-testnet
-
-# Spot edition
-python -m src.spot_main
 
 # Backtest (default: BTC/ETH/SOL/BNB)
 python -m src.backtest.run_backtest

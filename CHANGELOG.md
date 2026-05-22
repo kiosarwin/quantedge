@@ -4,6 +4,59 @@
 
 ---
 
+## [Unreleased] — 2026-05-22 — Futures-only + Aggressive-edge upgrade layer
+
+### Removed (spot pipeline retired)
+- Bot is now Binance Futures only.  Spot edition was a parallel pipeline
+  with its own scanner, scorer, risk manager, executor, trade manager and
+  config; it has been removed wholesale to eliminate drift risk.
+- `src/spot_main.py`, `src/scoring/spot_scorer.py`,
+  `src/risk/spot_risk_manager.py`, `src/execution/spot_executor.py`,
+  `src/execution/spot_trade_manager.py`, `src/scanner/spot_scanner.py`,
+  `src/data/spot_client.py`, `src/data/spot_market_data.py`,
+  `src/backtest/spot_backtester.py`, `config/config_spot.yaml`,
+  `SPOT_GUIDE.md`.
+- `src/analysis/spot_context.py` is **kept** — it is a futures-side feature
+  that pulls spot reference price/volume to detect basis premium and
+  Coinbase divergence; it has no dependency on the spot trading pipeline.
+
+### Added (futures upgrade layer)
+- `src/risk/session_modulator.py`: applies a session-aware size multiplier
+  (Asia/London/NY/overlap) on top of FundManager + Kelly.  Defaults derived
+  from rolling Sharpe-by-session studies on 2024–2025 BTC/ETH perpetuals;
+  overrides via `safety.session_size_multipliers`.
+- `src/risk/correlation_filter.py`: blocks opening trades that compound
+  existing exposure (same direction × high positive correlation, or opposite
+  direction × high negative correlation) with any open trade.  Hedging bets
+  pass freely.  Default cap: 0.85 absolute correlation over 48 1H bars.
+- `src/execution/trade_manager.py`: adverse-cut early exit.  Trades that
+  bleed past `mae_r_threshold` (0.65R) within the first 2 hours and have
+  not shown a meaningful favourable excursion (`mfe_r_ceiling` 0.20R) are
+  cut at current price instead of waiting for full -1R SL.  Converts ~1R
+  losers into ~0.6R losers without touching winners.
+
+### Changed
+- `src/models/edge_detector.py`: now reads `edge_detector.mode`
+  (`observer`|`soft_gate`|`active_gate`).  `soft_gate` applies size_mult
+  but never blocks; `active_gate` also blocks.  Default flipped from
+  `observer` to `soft_gate` so realised edge starts shaping notional.
+- `src/models/cohort_policy.py`: `CohortDecision.size_mult` now reflects
+  attribution health bounded `[0.6, 1.25]`; main.py already wires this.
+- `config/config.yaml`: added `risk.correlation_filter`,
+  `safety.session_size_multipliers`, `exit.early_cut`; flipped
+  `edge_detector.mode` to `soft_gate`.
+
+### Tests
+- `tests/test_futures_upgrades.py`: 13 new cases covering session modulator,
+  correlation filter (blocks compounding, allows hedge), edge detector
+  mode mapping, cohort size_mult attribution, and adverse-cut behaviour.
+
+### Verification
+- 87/87 tests pass (74 prior + 13 new).
+- NinjaTrader instantiates cleanly with all new modules wired.
+
+---
+
 ## [Unreleased] — 2026-05-19 — Strategy Stack Alignment
 
 ### Changed

@@ -250,6 +250,28 @@ class TradeManager:
             await self._close_trade(trade, price, "stop_loss")
             return
 
+        # ── Adverse-move early-cut ────────────────────────────────────
+        # Most losing trades go offside fast and stay offside.  If the
+        # trade has been running long enough, has bled past `early_cut_mae_r`
+        # of its risk, AND has shown no meaningful favourable excursion,
+        # we cut at current price instead of waiting for full SL.  This
+        # converts ~1R losers into ~0.6R losers without affecting winners.
+        if not trade.tp1_hit:
+            ec = self._cfg.get("exit", {}).get("early_cut", {}) or {}
+            if ec.get("enabled", True):
+                min_age_s = float(ec.get("min_age_s", 600) or 600)        # ≥10 min
+                max_age_s = float(ec.get("max_age_s", 7200) or 7200)      # ≤2 h
+                mae_threshold = float(ec.get("mae_r_threshold", 0.65) or 0.65)
+                mfe_ceiling = float(ec.get("mfe_r_ceiling", 0.20) or 0.20)
+                age = now - trade.opened_at
+                if (
+                    min_age_s <= age <= max_age_s
+                    and trade.mae_r >= mae_threshold
+                    and trade.mfe_r <= mfe_ceiling
+                ):
+                    await self._close_trade(trade, price, "early_adverse_cut")
+                    return
+
         # Trailing stop (after TP1 hit)
         if trade.trailing_stop is not None:
             if trade.direction == "long" and price <= trade.trailing_stop:

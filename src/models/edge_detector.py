@@ -157,7 +157,16 @@ class EdgeDetector:
     def __init__(self, cfg: dict):
         self._cfg = cfg
         edge_cfg = (cfg or {}).get("edge_policy", {}) or {}
-        self.is_blocking = bool(edge_cfg.get("enabled", False))
+        edge_det_cfg = (cfg or {}).get("edge_detector", {}) or {}
+        # New surface: edge_detector.mode = observer | soft_gate | active_gate.
+        # Falls back to the legacy edge_policy.enabled flag for backwards
+        # compatibility with old configs.
+        mode = str(edge_det_cfg.get("mode", "")).lower()
+        if not mode:
+            mode = "active_gate" if bool(edge_cfg.get("enabled", False)) else "observer"
+        self._mode = mode
+        self.is_blocking = mode == "active_gate"
+        self.affects_sizing = mode in {"soft_gate", "active_gate"}
         self._min_samples_to_block = int(edge_cfg.get("min_samples_to_block", 8) or 8)
         self._block_recent_wr = float(edge_cfg.get("block_recent_wr", 0.30) or 0.30)
         self._degraded_recent_wr = float(edge_cfg.get("degraded_recent_wr", 0.42) or 0.42)

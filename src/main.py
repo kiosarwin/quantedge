@@ -39,6 +39,8 @@ from src.models.ml_engine import MLPredictor, LiveReadiness
 from src.models.fund_manager import FundManager
 from src.models.cohort_policy import CohortPolicy
 from src.models.strategy_lifecycle import StrategyLifecycleManager
+from src.risk.correlation_filter import CorrelationFilter
+from src.risk.session_modulator import SessionModulator
 from src.data.dataset_logger import DatasetLogger
 from src.analysis.rejection_logger import RejectionLogger
 from src.reporting.attribution import build_attribution_report
@@ -176,6 +178,8 @@ class NinjaTrader:
         self._fund_mgr = FundManager(cfg, telegram_notifier=self._telegram, exploration_mode=self._exploration)
         self._cohort_policy = CohortPolicy(cfg)
         self._lifecycle = StrategyLifecycleManager(cfg)
+        self._session_mod = SessionModulator(cfg)
+        self._corr_filter = CorrelationFilter(cfg)
         self._paper_validation = cfg.get("paper_validation", {})
         self._equity_curve: list[float] = []
         self._equity_graph_points: list[dict[str, float]] = []
@@ -1130,6 +1134,17 @@ class NinjaTrader:
                             "[%s] edge_scale=%.2fx applied (%s/%s)",
                             bd.symbol, edge.size_mult, edge.status, edge.action,
                         )
+                    # Session-aware sizing — Asia/London/NY have very different
+                    # vol profiles; scale notional accordingly so a 1R bet
+                    # represents comparable real-world risk across sessions.
+                    if self._session_mod.is_enabled():
+                        ss = self._session_mod.current()
+                        if ss.multiplier != 1.0:
+                            total_scale *= ss.multiplier
+                            log.info(
+                                "[%s] session_scale=%.2fx applied (%s)",
+                                bd.symbol, ss.multiplier, ss.session,
+                            )
                     # Regime gate scale applied AFTER floor so soft-penalty can shrink below 0.40.
                     # Never amplifies (max 1.0 from regime_gate); only shrinks or leaves unchanged.
                     _rscale = _regime_scale_map.get(bd.symbol, 1.0)
@@ -1180,6 +1195,35 @@ class NinjaTrader:
                         continue
 
                     self._print_trade_card(bd, setup)
+
+                    # ── Correlation cap — block compounding bets ────────────
+                    # Concurrent longs on highly correlated assets are
+                    # effectively one beta-1 trade, not three.  When the
+                    # cluster goes offside, all stops fire together.
+                    if self._corr_filter.is_enabled():
+                        cand_returns = self._symbol_returns(snap)
+                        open_book = self._open_trades_returns(snapshots)
+                        cd = self._corr_filter.evaluate(
+                            candidate_symbol=bd.symbol,
+                            candidate_direction=bd.direction,
+                            candidate_returns=cand_returns,
+                            open_trades=open_book,
+                        )
+                        if not cd.allowed:
+                            log.info("[%s] correlation cap blocked — %s", bd.symbol, cd.reason)
+                            self._rej.log(
+                                stage="correlation_cap",
+                                reason=cd.reason,
+                                breakdown=bd,
+                                threshold_required=_bd_thresh,
+                                fm_scale=total_scale,
+                                ml_p_win=_p_win,
+                                ml_threshold=self._ml.dynamic_p_win_threshold,
+                                funding_rate=_bd_fr,
+                            )
+                            if self._shadow:
+                                self._shadow.record_rejected(bd, stage="correlation_cap")
+                            continue
 
                     # Encode all edge dimensions for ML
                     sm = bd.smart_money
@@ -1900,6 +1944,42 @@ class NinjaTrader:
             except Exception as exc:
                 log.warning("Could not fetch price for open trade %s: %s", symbol, exc)
         return price_map
+
+    # ------------------------------------------------------------------ #
+    #  Correlation-filter helpers                                         #
+    # ------------------------------------------------------------------ #
+
+    def _symbol_returns(self, snap):
+        """Return log-returns of the primary timeframe for a snapshot."""
+        if snap is None:
+            return None
+        try:
+            df = snap.candles_for(self._cfg["timeframes"]["primary"])
+            if df is None or df.empty or len(df) < 24:
+                return None
+            import numpy as np
+            close = df["close"].astype(float)
+            return np.log(close / close.shift(1)).dropna()
+        except Exception as exc:
+            log.debug("symbol_returns failed: %s", exc)
+            return None
+
+    def _open_trades_returns(self, snapshots) -> dict:
+        """Build {symbol: {direction, returns}} for currently open trades."""
+        out: dict[str, dict] = {}
+        for sym in self._trade_mgr.open_symbols:
+            trade = self._trade_mgr._trades.get(sym)
+            if not trade:
+                continue
+            snap = snapshots.get(sym)
+            returns = self._symbol_returns(snap) if snap is not None else None
+            if returns is None:
+                continue
+            out[sym] = {
+                "direction": trade.setup.direction,
+                "returns": returns,
+            }
+        return out
 
     def _threshold_for(self, regime) -> float:
         thresholds = self._trading.get("regime_thresholds", {})
