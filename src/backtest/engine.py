@@ -201,7 +201,12 @@ class BacktestEngine:
             if open_trade is not None:
                 open_trade, closed = self._check_exits(open_trade, bar_high, bar_low, bar_close, i)
                 if closed:
-                    commission = abs(open_trade.pnl_usd) * self._commission_pct * 2
+                    # Round-trip commission is on the entry+exit notional, not
+                    # on PnL — historic implementation incorrectly scaled with
+                    # |pnl| which double-counted on big winners and ignored
+                    # break-even trades. Entry commission was already debited
+                    # at trade open, so we only charge the exit leg here.
+                    commission = open_trade.size_usd * self._commission_pct
                     open_trade.pnl_usd -= commission
                     equity += open_trade.pnl_usd
                     self._risk.on_trade_closed(open_trade.pnl_usd)
@@ -253,7 +258,8 @@ class BacktestEngine:
             last_close = float(last["close"])
             mult = 1 if open_trade.direction == "long" else -1
             open_trade.pnl_usd = mult * (last_close - open_trade.entry_price) * open_trade.remaining_contracts
-            open_trade.pnl_usd -= open_trade.pnl_usd * self._commission_pct * 2
+            # Exit-leg commission on notional (entry leg already debited).
+            open_trade.pnl_usd -= open_trade.size_usd * self._commission_pct
             open_trade.exit_price = last_close
             open_trade.exit_reason = "end_of_data"
             open_trade.exit_bar = len(df) - 1
@@ -433,13 +439,19 @@ class BacktestEngine:
                 if new_trail < trade.trailing_stop:
                     trade.trailing_stop = new_trail
 
-        # 4. TP2 partial (closes tp2_size_pct of REMAINDER, matches live)
+        # 4. TP2 partial — closes tp2_size_pct of ORIGINAL position (matches
+        #    live + exchange-placed reduceOnly TP order). Earlier versions
+        #    used remaining*tp2_size_pct which left a much larger residual to
+        #    trail than the configured trail_size_pct.
         tp3 = trade.entry_price + mult * trade.r_distance * float(
             self._exit_cfg.get("tp3_r_multiple", 3.0)
         )
         tp2_already_hit = getattr(trade, "_tp2_hit", False)
         if trade.tp1_hit and not tp2_already_hit and trade.is_tp2_hit(low, high):
-            tp2_qty = trade.remaining_contracts * trade.tp2_size_pct
+            tp2_qty = min(
+                trade.remaining_contracts,
+                trade.size_contracts * trade.tp2_size_pct,
+            )
             tp2_pnl = mult * (trade.tp2 - trade.entry_price) * tp2_qty
             trade.pnl_usd += tp2_pnl
             trade.remaining_contracts -= tp2_qty

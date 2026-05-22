@@ -113,7 +113,6 @@ class EVModel:
 
         matched, all_samples = self._match_samples(trade_log, ctx)
         sample_size = len(matched)
-
         # ---- P(win) with Bayesian shrinkage --------------------------
         if sample_size > 0:
             wins_pct = [t for t in matched if _pnl_pct(t) > 0]
@@ -150,7 +149,19 @@ class EVModel:
 
         # ---- Cost model (% per trade) -------------------------------
         cost_pct = self._round_trip_cost_pct
-        funding_cost_pct = abs(float(funding_rate or 0.0)) * 100.0  # rough proxy
+        # Direction-aware funding-rate proxy.  Longs pay positive funding and
+        # earn it when negative; shorts are the mirror image.  Treating both
+        # sides as paying (the historic abs() default) systematically
+        # under-counts EV for the side that actually receives funding.
+        # `funding_rate` is fractional per 8h period — we charge it as a
+        # % cost (or credit) on the trade leg.  Conservatively only credit
+        # *up to* the cost ceiling so a one-off large negative funding
+        # never masquerades as additional alpha.
+        fr = float(funding_rate or 0.0)
+        if ctx.direction == "short":
+            funding_cost_pct = -fr * 100.0
+        else:
+            funding_cost_pct = fr * 100.0
 
         # ---- EV --------------------------------------------------------
         ev_gross = p_win * avg_win - (1.0 - p_win) * avg_loss

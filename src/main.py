@@ -1411,17 +1411,29 @@ class NinjaTrader:
     async def _on_trade_closed(self, trade: OpenTrade, pnl: float, reason: str) -> None:
         scores = self._pending_scores.pop(trade.symbol, {})
         entry_p = trade.setup.entry_price
-        close_p = trade.setup.entry_price
-        if "stop" in reason:
-            close_p = trade.setup.stop_loss
-        elif reason == "tp1":
-            close_p = trade.setup.tp1
-        elif reason in ("tp2", "tp2_full"):
-            close_p = trade.setup.tp2
-        elif reason == "tp3":
-            close_p = trade.setup.tp3
-        elif reason == "trailing_stop" and trade.trailing_stop is not None:
-            close_p = trade.trailing_stop
+        # Prefer the actual market close price stamped by TradeManager
+        # (covers every exit reason: stop_loss, trailing_stop, tp1, tp2,
+        # tp2_full, tp3, early_adverse_cut, max_hold, manual, end_of_data).
+        # Falls back to the closest setup level only when the stamp is
+        # missing (older state files) so older OpenTrade payloads keep
+        # working after the upgrade.
+        close_p = float(getattr(trade, "exit_price", 0.0) or 0.0)
+        if close_p <= 0.0:
+            if reason == "stop_loss":
+                close_p = trade.setup.stop_loss
+            elif reason == "trailing_stop" and trade.trailing_stop is not None:
+                close_p = trade.trailing_stop
+            elif reason == "tp1":
+                close_p = trade.setup.tp1
+            elif reason in ("tp2", "tp2_full"):
+                close_p = trade.setup.tp2
+            elif reason == "tp3":
+                close_p = trade.setup.tp3
+            else:
+                # early_adverse_cut / max_hold / manual / end_of_data — best
+                # we can do without the stamp is the entry price; pnl_usd is
+                # still authoritative so reporting stays correct.
+                close_p = entry_p
         pre_close_equity = self._risk.state.equity - pnl
         pnl_pct = (pnl / pre_close_equity * 100) if pre_close_equity > 0 else 0.0
 
@@ -1466,11 +1478,11 @@ class NinjaTrader:
         try:
             _sm_phase = str(scores.get("sm_phase", "neutral"))
             _edge_type = f"{_regime_str}|{_sm_phase}|{trade.direction}"
-            self._scorer.edge_detector.memory.record(
+            self._scorer.edge_detector.memory.record_outcome(
                 pair=trade.symbol,
                 edge_type=_edge_type,
                 regime=_regime_str,
-                won=(pnl_pct > 0),
+                pnl_pct=pnl_pct,
             )
         except Exception as _exc:
             log.debug("EdgeMemory record failed: %s", _exc)

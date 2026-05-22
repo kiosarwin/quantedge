@@ -38,6 +38,13 @@ class OpenTrade:
     mfe_peak_ts: float = 0.0        # timestamp when mfe_r last improved
     drawdown_total_s: float = 0.0   # cumulative seconds spent in adverse territory
     _adverse_since: float = 0.0     # internal: timestamp adverse run started
+    # Last market price at which the trade was actually closed.  Set by
+    # TradeManager._close_trade just before invoking the on_close callback
+    # so downstream consumers (TradeRecord, attribution, dataset_logger)
+    # see the real exit price for *every* exit reason — not just the
+    # subset (tp1/tp2/tp3/sl/trail) that maps cleanly back to a setup
+    # field.  0.0 means "not yet closed".
+    exit_price: float = 0.0
 
     @property
     def symbol(self) -> str:
@@ -259,10 +266,17 @@ class TradeManager:
         if not trade.tp1_hit:
             ec = self._cfg.get("exit", {}).get("early_cut", {}) or {}
             if ec.get("enabled", True):
-                min_age_s = float(ec.get("min_age_s", 600) or 600)        # ≥10 min
-                max_age_s = float(ec.get("max_age_s", 7200) or 7200)      # ≤2 h
-                mae_threshold = float(ec.get("mae_r_threshold", 0.65) or 0.65)
-                mfe_ceiling = float(ec.get("mfe_r_ceiling", 0.20) or 0.20)
+                # Note: cannot use `dict.get(k, default) or default` here
+                # because legitimate 0 / 0.0 values are falsy and would
+                # silently revert to the historical defaults.
+                def _ec_float(key: str, default: float) -> float:
+                    val = ec.get(key)
+                    return float(val) if val is not None else float(default)
+
+                min_age_s = _ec_float("min_age_s", 600)         # ≥10 min default
+                max_age_s = _ec_float("max_age_s", 7200)        # ≤2 h default
+                mae_threshold = _ec_float("mae_r_threshold", 0.65)
+                mfe_ceiling = _ec_float("mfe_r_ceiling", 0.20)
                 age = now - trade.opened_at
                 if (
                     min_age_s <= age <= max_age_s
@@ -316,17 +330,26 @@ class TradeManager:
                     if self._on_progress:
                         await self._on_progress(trade, "trail_update", price)
 
-        # TP2 partial exit — close tp2_size_pct, let remainder trail to TP3
+        # TP2 partial exit — close tp2_size_pct of ORIGINAL position, let
+        # the configured trail_size_pct trail to TP3.  The exchange-placed
+        # reduceOnly TP order is sized as `setup.size_contracts *
+        # tp2_size_pct`, so local accounting MUST close the same fraction
+        # of the original position to stay in sync with exchange state.
         if not trade.tp1_hit:
             pass  # TP1 not yet hit, nothing to do for TP2 yet
         elif trade.is_tp2_hit(price) and not trade.tp2_hit:
             trade.tp2_hit = True
-            tp2_close_pct = trade.setup.tp2_size_pct
-            contracts_to_close = trade.remaining_contracts * tp2_close_pct
+            contracts_to_close = min(
+                trade.remaining_contracts,
+                trade.setup.size_contracts * trade.setup.tp2_size_pct,
+            )
             pnl = abs(trade.setup.tp2 - trade.setup.entry_price) * contracts_to_close
             trade.realized_pnl += pnl
             trade.remaining_contracts -= contracts_to_close
-            log.info("[%s] TP2 hit @ %.4f — closed %.1f%%, trailing remainder", trade.symbol, price, tp2_close_pct * 100)
+            log.info(
+                "[%s] TP2 hit @ %.4f — closed %.1f%% of original, trailing remainder %.4f contracts",
+                trade.symbol, price, trade.setup.tp2_size_pct * 100, trade.remaining_contracts,
+            )
             if self._on_progress:
                 await self._on_progress(trade, "tp2", price)
             self._save_state()
@@ -359,6 +382,12 @@ class TradeManager:
         fee_pct = self._cfg.get("ev_model", {}).get("taker_fee_pct", 0.04) / 100
         fee_cost = trade.setup.size_usd * fee_pct * 2   # entry + exit legs
         total_pnl = trade.realized_pnl + close_pnl - fee_cost
+
+        # Stamp the actual market close price on the trade BEFORE calling the
+        # on_close callback so downstream consumers can read trade.exit_price
+        # for every exit reason — including early_adverse_cut, max_hold,
+        # manual, end_of_data, etc., which previously fell back to entry_price.
+        trade.exit_price = float(price)
 
         self._risk.on_trade_closed(
             total_pnl,
@@ -435,6 +464,7 @@ class TradeManager:
             "mae_r": trade.mae_r,
             "mfe_peak_ts": trade.mfe_peak_ts,
             "drawdown_total_s": trade.drawdown_total_s,
+            "exit_price": trade.exit_price,
         }
 
     @staticmethod
@@ -476,6 +506,7 @@ class TradeManager:
                 mae_r=td.get("mae_r", 0.0),
                 mfe_peak_ts=td.get("mfe_peak_ts", 0.0),
                 drawdown_total_s=td.get("drawdown_total_s", 0.0),
+                exit_price=td.get("exit_price", 0.0),
             ), upgraded
         except Exception as exc:
             log.warning("Failed to deserialize trade %s: %s", td.get("setup", {}).get("symbol", "?"), exc)
