@@ -146,9 +146,9 @@ All settings in `config/config.yaml`.
 | Setting | Default | Description |
 |---|---|---|
 | `trading.mode` | `paper` | `paper` / `live` / `backtest` |
-| `trading.paper_starting_equity` | `10000` | Virtual USDT for paper mode |
-| `trading.min_score_threshold` | `75` | Minimum score to open trade |
-| `trading.max_open_trades` | `3` | Max concurrent positions |
+| `trading.paper_starting_equity` | `70` | Virtual USDT for paper mode |
+| `trading.min_score_threshold` | `42` | Minimum score to open trade |
+| `trading.max_open_trades` | `2` | Max concurrent positions |
 | `risk.default_leverage` | `5` | Leverage for new positions |
 | `risk.risk_per_trade_pct` | `1.5` | % equity risked per trade |
 | `risk.daily_loss_cap_pct` | `5.0` | Circuit breaker: daily loss % |
@@ -169,7 +169,7 @@ Already configured in `config/config.yaml`:
 telegram:
   token: "YOUR_TELEGRAM_TOKEN"
   chat_id: YOUR_TELEGRAM_CHAT_ID
-  heartbeat_interval_minutes: 60
+  heartbeat_interval_minutes: 1
 ```
 
 ---
@@ -185,7 +185,7 @@ Scan symbols (every 60s)
       [1] Regime gate   — must be TRENDING_EXPANSION or ACCUMULATION_COMPRESSION
       [2] Smart money   — must not be CHAOS; NEUTRAL passes through
       [3] EV gate       — net EV > 0 after fees (bypassed for first 20 trades)
-  → Score must be ≥ 75
+  → Score must be ≥ configured threshold (current paper baseline: 42)
   → Open position with Kelly-sized risk
   → Manage exits: TP1 (50%) → TP2 (30%) → trailing stop (20%)
   → Log to parquet, update ML weights
@@ -225,7 +225,7 @@ Scan symbols (every 60s)
 | TP2 | +2.0R | 30% |
 | Trailing stop | After TP1 hit | 20% (1.5 ATR trail) |
 | Breakeven | After TP1 | Move SL to entry |
-| Max hold | 60 minutes | Force close remaining |
+| Max hold | 48 hours | Force close remaining |
 
 ---
 
@@ -277,10 +277,10 @@ Fix:
 ```yaml
 trading:
   mode: paper
-  paper_starting_equity: 10000
+  paper_starting_equity: 70
 ```
 
-### No trades opening (scores 60–70, below 75)
+### No trades opening (scores 60–70, below threshold)
 
 Normal when market is ranging or low-volatility. Check:
 ```bash
@@ -419,12 +419,12 @@ Or press `Ctrl+C` in the terminal running the bot.
 
 | Metric | Value |
 |---|---|
-| Min score to trade | 75 / 100 |
-| Max concurrent trades | 3 |
+| Min score to trade | 42 / 100 |
+| Max concurrent trades | 2 |
 | Default leverage | 5× |
 | Risk per trade | 1.5% equity |
 | Daily loss cap | 5% equity |
-| Max drawdown cap | 10% equity |
+| Max drawdown cap | 20% equity |
 | EV bootstrap trades | 20 |
 | Taker fee | 0.04% |
 | TP1 / TP2 / Trail | 50% / 30% / 20% |

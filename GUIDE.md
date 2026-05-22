@@ -100,8 +100,8 @@ exchange:
 trading:
   mode: paper          # paper | live
                        # paper = simulates fills, no real orders sent
-  min_score_threshold: 75   # only enter if signal score >= 75/100
-  max_open_trades: 3        # maximum simultaneous positions
+  min_score_threshold: 42   # only enter if signal score >= configured threshold
+  max_open_trades: 2        # maximum simultaneous positions (paper override widens further)
   top_pairs_to_trade: 2     # pick top 2 scored pairs each cycle
   scan_interval_seconds: 60 # how often to re-scan the market
 ```
@@ -110,11 +110,11 @@ trading:
 ```yaml
 risk:
   risk_per_trade_pct: 1.5    # risk 1.5% of account per trade
-  max_risk_per_trade_pct: 2.0
+  max_risk_per_trade_pct: 2.5
   daily_loss_cap_pct: 5.0    # stop trading if down 5% on the day
-  max_drawdown_pct: 10.0     # stop if portfolio drops 10% from peak
+  max_drawdown_pct: 20.0     # stop if portfolio drops 20% from peak
   min_rr_ratio: 2.0          # skip trade if reward < 2x risk
-  default_leverage: 5        # 5x leverage on every position
+  default_leverage: 6        # 6x leverage on every position
   max_leverage: 10
 ```
 
@@ -246,7 +246,7 @@ behaviour with volatility clustering. Results are indicative, not exact.
 ## 7. How Signals & Scoring Work
 
 Every scan cycle the bot scores each pair 0–100. Only pairs above
-`min_score_threshold` (default 75) are traded.
+`min_score_threshold` (current paper baseline 42) are traded.
 
 ### Signal pipeline
 
@@ -303,9 +303,9 @@ The risk manager blocks new trades when any of these are true:
 
 | Guard | Default trigger |
 |---|---|
-| Max open trades | 3 positions |
+| Max open trades | 2 positions |
 | Daily loss cap | −5% of account equity |
-| Max drawdown | −10% from equity peak |
+| Max drawdown | −20% from equity peak |
 | Consecutive losses | 5 losses in a row |
 
 ### Position sizing formula
@@ -316,14 +316,14 @@ Position size  = Risk / Distance to stop loss
 ```
 
 Example:
-- Account: $10,000
-- Risk per trade: $150
+- Account: $70
+- Risk per trade: $1.05
 - Stop loss distance: 2% below entry
-- Position size: $150 / 0.02 = $7,500 notional
+- Position size: $1.05 / 0.02 = $52.50 notional
 
 ### Leverage
 
-Default leverage is 5x. The bot sets leverage automatically via API before
+Default leverage is 6x. The bot sets leverage automatically via API before
 opening each position. Cap is 10x regardless of config.
 
 ---
@@ -363,6 +363,8 @@ Set TP2 order (30% size)
 
 After every 20 closed trades, the learner analyses which signals
 predicted wins vs losses and nudges weights accordingly.
+
+`AdaptiveBrain` is already active as a sizing and pair-health overlay. The passive `MLPredictor` interface remains available for compatibility, but it is not the main decision brain.
 
 **Example:**
 - If `structure_quality` score was consistently higher on winning trades → its weight increases slightly

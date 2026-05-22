@@ -1,6 +1,6 @@
 # Ninja Trader
 
-Bot trading futures yang dibangun sebagai stack kuantitatif bertahap: rule engine, scoring, risk guard, ML helper, lalu roadmap menuju `quant mini`.
+Bot trading futures yang dibangun sebagai stack kuantitatif bertahap: rule engine, scoring, risk guard, adaptive ML overlays, lalu roadmap menuju `quant mini`.
 
 ## Pintu Masuk Untuk Semua Model AI
 
@@ -55,10 +55,10 @@ Jika Anda adalah model AI apa pun — `Codex`, `Claude`, `Gemini`, atau lainnya 
 Arsitektur bot saat ini terdiri dari:
 
 - **scoring layer** untuk menilai setup
-- **strategy router** untuk memilih sleeve; alpha utama saat ini adalah `trend_following` dan `reversal`, sedangkan `neutral` adalah fallback residual dan tidak diperlakukan sebagai alpha
+- **strategy router** untuk memilih sleeve; alpha utama saat ini adalah `trend_following` dan `reversal`, sedangkan `neutral` adalah fallback residual dan `compression_breakout` tetap experimental
 - **EV / p(win) layer** untuk menyaring edge
 - **risk manager** untuk posisi, stop, dan exposure
-- **ML layer** untuk prediksi, sizing, dan gating terkontrol
+- **adaptive brain / ML layer** untuk sizing, pair-health gating, dan readiness; `MLPredictor` di `ml_engine.py` masih bersifat pasif
 - **reporting layer** untuk attribution, audit, dan review
 
 Target evolusinya adalah sistem `quant mini` dengan satu decision layer utama, tetapi tetap memakai pagar risiko keras.
@@ -78,7 +78,8 @@ Target evolusinya adalah sistem `quant mini` dengan satu decision layer utama, t
 
 - `src/main.py` — orkestrasi utama bot
 - `src/scoring/scorer.py` — scoring dan router
-- `src/models/ml_engine.py` — ML predictor dan readiness
+- `src/models/adaptive_brain.py` — adaptive sizing overlay dan pair-health veto
+- `src/models/ml_engine.py` — passive predictor interface dan readiness helper
 - `src/models/ev_model.py` — EV gate dan probabilitas
 - `src/risk/risk_manager.py` — risk, sizing, dan exit setup
 - `src/execution/trade_manager.py` — lifecycle trade

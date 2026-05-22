@@ -15,13 +15,15 @@
 3. Score threshold
 4. Cohort policy
 5. Strategy lifecycle gate
-6. ML / regime soft gate
+6. Adaptive brain / ML soft gate
 7. Risk guard
 8. Exposure guard
 9. Execution
 
 Signal validity and execution permission are intentionally separate.
 `neutral` is not treated as alpha in the live admission path; it is a residual routing state and is excluded by the default strategy allowlists.
+
+`AdaptiveBrain` runs after the main rule gates as a sizing / pair-health overlay. It can veto a pair that has decayed, but it does not replace the router or the hard risk manager.
 
 ## Lifecycle statuses
 
@@ -36,14 +38,10 @@ Signal validity and execution permission are intentionally separate.
 
 Primary cohort health is tracked by:
 
-- `strategy_name`
+- `strategy_sleeve`
 - `market_regime`
+- `sm_phase`
 - `session`
-- `volatility_bucket`
-- `trend_bucket`
-- `signal_type`
-- `asset`
-- `timeframe`
 - `direction`
 
 ## Metrics to monitor

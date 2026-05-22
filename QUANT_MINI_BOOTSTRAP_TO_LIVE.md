@@ -12,7 +12,7 @@ Tujuan:
 
 Aturan:
 
-- ML hanya berperan sebagai advisor
+- AdaptiveBrain boleh memengaruhi sizing dan pair-health
 - veto keras dibatasi atau dimatikan
 - sizing dapat turun, tetapi tidak mematikan flow
 - risk manager tetap menjadi pagar keras

@@ -13,7 +13,7 @@
 
 ## B. Kualitas Statistik
 
-- [ ] Tambahkan tracking calibration untuk ML
+- [ ] Tambahkan tracking calibration untuk ML / AdaptiveBrain
 - [ ] Tambahkan veto rate per hari dan per regime
 - [ ] Tambahkan gap OOS vs in-sample
 - [ ] Tambahkan rolling PF, hit rate, dan expectancy per sleeve
@@ -21,11 +21,11 @@
 
 ## C. ML Sebagai Advisor
 
-- [ ] ML memberi `p_win` yang stabil
-- [ ] ML memberi ranking kandidat trade
-- [ ] ML memberi sizing bonus/penalty yang konservatif
-- [ ] ML tidak memveto trade terlalu dini
-- [ ] ML tetap dapat dimatikan tanpa mematikan bot
+- [ ] ML / AdaptiveBrain memberi `p_win` yang stabil
+- [ ] ML / AdaptiveBrain memberi ranking kandidat trade
+- [ ] ML / AdaptiveBrain memberi sizing bonus/penalty yang konservatif
+- [ ] ML / AdaptiveBrain tidak memveto trade terlalu dini
+- [ ] ML / AdaptiveBrain tetap dapat dimatikan tanpa mematikan bot
 
 ## D. ML Sebagai Gate Terkontrol
 

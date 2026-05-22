@@ -80,7 +80,8 @@ Automated Binance Futures (USDT-margined perpetual) trading bot in Python.
 
 ```bash
 python3 -m venv venv && source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock
+pip install -r requirements.lock -r requirements-dev.txt
 ```
 
 Credentials go in `.env` (never `config.yaml`):
@@ -108,7 +109,7 @@ python -m src.backtest.run_backtest --symbols BTCUSDT ETHUSDT --start 2023-01-01
 python -m src --config /path/to/config.yaml
 ```
 
-There is no test suite — validate changes by running in paper mode.
+A focused pytest suite exists. Prefer the smallest relevant test slice first, then widen only if the change touches shared behavior.
 
 ### Architecture
 
@@ -117,7 +118,7 @@ Single async loop (`NinjaTrader._loop`) on a configurable scan interval:
 ```
 Scanner → MarketDataService → Scorer (7 signals + 3 gates) → RiskManager
 → Executor → TradeManager (TP1/TP2/trail/SL/timeout)
-→ Learner → MLPredictor (XGBoost, gates entries after 20+ trades)
+→ Learner → AdaptiveBrain / passive MLPredictor interface
 → FundManager (size multiplier) + ShadowEngine (ghost trades for ML data)
 ```
 
@@ -128,6 +129,7 @@ Scanner → MarketDataService → Scorer (7 signals + 3 gates) → RiskManager
 | `config/config.yaml` | All tunable parameters (mode, risk, scoring weights, etc.) |
 | `src/analysis/` | Indicators, regime, smart money, structure (BOS/sweeps), EV model |
 | `src/models/ev_model.py` | Probabilistic EV: Bayesian p_win, fees, slippage |
+| `src/models/adaptive_brain.py` | Active sizing overlay, pair-health veto, online learning |
 | `src/models/regime_classifier.py` | Regime: trending_expansion / accumulation_compression / distribution / chaos |
 | `data/state.json` | Live dashboard state written each tick |
 | `models/learning_state_futures.json` | Persisted scorer weights |

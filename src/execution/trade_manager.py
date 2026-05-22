@@ -335,8 +335,23 @@ class TradeManager:
             self._save_state()
 
         # Update trailing stop (ratchet only — never widen)
+        # Ref: arXiv:1701.03960 "Optimal Trading with a Trailing Stop"
+        # Uses regime-adaptive ATR multiplier: tighter in trending (capture gains),
+        # wider in volatile (avoid noise whipsaws).
         if trade.tp1_hit and trade.trailing_stop is not None:
-            trail_dist = trade.setup.atr * trade.setup.trailing_atr_multiplier
+            # Adaptive trailing: reduce multiplier as MFE grows (lock profits)
+            base_mult = trade.setup.trailing_atr_multiplier
+            if trade.mfe_r >= 2.5:
+                # Deep profit — tighten aggressively to lock gains
+                adaptive_mult = base_mult * 0.65
+            elif trade.mfe_r >= 1.8:
+                adaptive_mult = base_mult * 0.80
+            elif trade.mfe_r >= 1.2:
+                adaptive_mult = base_mult * 0.90
+            else:
+                adaptive_mult = base_mult
+
+            trail_dist = trade.setup.atr * adaptive_mult
             if trade.direction == "long":
                 new_trail = price - trail_dist
                 if new_trail > trade.trailing_stop:

@@ -40,15 +40,17 @@ class KellyResult:
 class KellySizer:
     def __init__(self, cfg: dict):
         kelly_cfg = cfg.get("kelly", {})
-        self._fraction = kelly_cfg.get("fraction", 0.25)
-        self._max_risk_pct = kelly_cfg.get("max_kelly_pct", 3.0) / 100
-        self._min_risk_pct = kelly_cfg.get("min_kelly_pct", 0.5) / 100
+        self._fraction = kelly_cfg.get("fraction", 0.30)  # UPGRADED: 30% Kelly (was 25%)
+        self._max_risk_pct = kelly_cfg.get("max_kelly_pct", 5.0) / 100  # UPGRADED: 5% cap
+        self._min_risk_pct = kelly_cfg.get("min_kelly_pct", 0.7) / 100  # UPGRADED: 0.7% floor
         self._vol_scale = kelly_cfg.get("volatility_scale", True)
         self._target_atr_pct = kelly_cfg.get("vol_target_atr_pct", 1.5) / 100
+        # Aggressive confidence scaling: high-confidence setups get extra size
+        self._confidence_scaling = kelly_cfg.get("confidence_scaling", True)
 
         # Fallback if Kelly not used: use config risk %
         self._default_risk_pct = cfg.get("risk", {}).get("risk_per_trade_pct", 1.5) / 100
-        self._max_hard_cap = cfg.get("risk", {}).get("max_risk_per_trade_pct", 2.0) / 100
+        self._max_hard_cap = cfg.get("risk", {}).get("max_risk_per_trade_pct", 2.5) / 100
 
     def size(
         self,
@@ -98,15 +100,28 @@ class KellySizer:
                 # Scale inversely: high vol → smaller; low vol → larger, bounded [0.5, 1.5]
                 vol_scalar = float(min(1.5, max(0.5, self._target_atr_pct / current_atr_pct)))
 
+        # ── Confidence-based aggressive scaling ───────────────────────
+        # Ref: Kelly Criterion optimal sizing — when edge is proven (high
+        # confidence + high p_win), size more aggressively up to the
+        # theoretical Kelly optimum. This is the "aggressive on proven edge" mode.
+        confidence_mult = 1.0
+        if self._confidence_scaling and ev.confidence >= 0.7:
+            if ev.p_win >= 0.58 and ev.ev_net_pct >= 0.15:
+                # High-conviction: scale up to 1.4x the base Kelly
+                confidence_mult = 1.0 + (ev.confidence - 0.7) * 1.33  # max ~1.4x at conf=1.0
+            elif ev.p_win >= 0.52 and ev.ev_net_pct >= 0.08:
+                confidence_mult = 1.0 + (ev.confidence - 0.7) * 0.67  # max ~1.2x
+
         # ── Final risk % ──────────────────────────────────────────────
         if fractional_kelly <= 0 or not ev.is_tradeable:
             # Fall back to default when Kelly is flat or uninformative
             risk_pct = self._default_risk_pct
             rationale = f"Fallback to default {risk_pct:.1%} (Kelly={fractional_kelly:.3%})"
         else:
-            risk_pct = fractional_kelly * vol_scalar
+            risk_pct = fractional_kelly * vol_scalar * confidence_mult
             rationale = (
                 f"Kelly={kelly_raw:.3%}  ×{self._fraction}frac  ×{vol_scalar:.2f}vol"
+                f"  ×{confidence_mult:.2f}conf"
             )
 
         # Hard caps

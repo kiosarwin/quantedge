@@ -15,6 +15,8 @@ Bot ini memperlakukan trading crypto perpetual directional sebagai stack yang sa
 
 `neutral` bukan sleeve alpha utama. Itu fallback ketika tidak ada sleeve yang tervalidasi dengan cukup kuat untuk dipromosikan. Trade masih bisa lolos, tetapi biasanya dengan score/sizing yang lebih konservatif dan alasan seperti `no validated sleeve` atau `short side restricted...`.
 
+Saat ini `trend_long_only` di config bernilai `false`, jadi `trend_following` bisa dipakai untuk long dan short. Short reversal tetap lebih selektif daripada long trend.
+
 Basis riset yang dipakai:
 
 - Momentum time-series / trend following merupakan salah satu edge directional paling konsisten pada instrumen futures yang likuid.
@@ -44,7 +46,7 @@ Tabel ini memisahkan **thesis akademik** dari **cara implementasi sekarang**.
 
 | Sleeve | Thesis akademik | Basis | Implementasi sekarang | Status |
 |---|---|---|---|---|
-| `trend_following` | Time-series momentum pada futures likuid | Kuat | Core sleeve utama, long-only di config saat ini | **Strong** |
+| `trend_following` | Time-series momentum pada futures likuid | Kuat | Core sleeve utama, long/short enabled di config saat ini | **Strong** |
 | `reversal` | Momentum dapat berbalik pada rezim crowding / liquidation / diffusion lag | Menengah-kuat | Diaktifkan lewat smart-money + distribution/liquidity-sweep context | **Strong / conditional** |
 | `compression_breakout` | Continuation setelah compression / accumulation | Menengah | Tersedia tetapi masih digate; lebih heuristik daripada thesis utama | **Moderate / experimental** |
 | `neutral` | Bukan thesis alpha; bucket residual | Lemah / none | Fallback saat tidak ada sleeve tervalidasi | **Not alpha** |
@@ -72,6 +74,7 @@ Efek pada sistem:
 - memperbesar ukuran posisi
 - sedikit menurunkan threshold
 - mengecil ketika dispersion naik
+- arah trade mengikuti sinyal direction yang lolos router; long-only bukan asumsi default
 
 ### `compression_breakout`
 
@@ -141,7 +144,7 @@ Urutan keputusan praktis yang paling dekat dengan implementasi sekarang:
 2. Cek `smart_money` dan event mikrostruktur seperti `liquidity_sweep`.
 3. Evaluasi `funding`, `basis`, dan `open_interest` sebagai filter.
 4. Hitung `dispersion` untuk menentukan apakah trend perlu diredam.
-5. Pilih sleeve: `trend_following`, `reversal`, `compression_breakout`, atau `neutral`.
+5. Pilih sleeve atau short-setup label: `trend_following`, `reversal`, `compression_breakout`, atau `neutral`.
 6. Terapkan multiplier score dan sizing dari sleeve terpilih.
 
 Aturan sederhana yang bisa dibaca langsung:
@@ -178,7 +181,7 @@ Evaluasi ke depan harus melaporkan:
 
 Sudah diimplementasikan:
 
-- `strategy_router` merutekan ke `trend_following`, `compression_breakout`, `reversal`, dan `neutral`
+- `strategy_router` merutekan ke `trend_following`, `compression_breakout`, `reversal`, short-setup labels, dan `neutral`
 - `neutral` dipakai sebagai fallback routing, bukan sebagai sleeve alpha mandiri
 - overlay score dan sizing yang aware terhadap dispersion telah diterapkan di scorer
 - attribution untuk sleeve, exit profile, regime, dan side telah direkam di reporting

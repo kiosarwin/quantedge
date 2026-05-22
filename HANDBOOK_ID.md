@@ -41,7 +41,8 @@ Scan Pasar → Nilai Sinyal → Cek Risiko → Buka Posisi → Kelola Exit
 | Trade Manager | `execution/trade_manager.py` | Memantau posisi aktif dan eksekusi exit |
 | Learner | `learning/learner.py` | Menyimpan riwayat trade dan menyesuaikan bobot sinyal |
 | EV Model | `models/ev_model.py` | Menghitung expected value sebelum masuk trade |
-| ML Engine | `models/ml_engine.py` | Memeriksa kesiapan live trading |
+| Adaptive Brain | `models/adaptive_brain.py` | Overlay sizing aktif, veto pair-health, pembelajaran online |
+| ML Engine | `models/ml_engine.py` | Interface prediktor pasif dan helper kesiapan live trading |
 | Fund Manager | `models/fund_manager.py` | Laporan performa (Sharpe, win rate, profit factor) |
 | Shadow Engine | `backtest/shadow_engine.py` | Trade bayangan tanpa modal untuk mempercepat pengumpulan data |
 | Dataset Logger | `data/dataset_logger.py` | Menulis dataset 85 kolom ke file parquet untuk ML |
@@ -158,9 +159,9 @@ Jika sinyal tidak dikonfirmasi dalam 5 menit → **sinyal kedaluwarsa**.
 
 | Parameter | Nilai |
 |---|---|
-| Risiko default | 1.5% ekuitas = $7.50 (dari $500) |
-| Batas maksimum | 2.0% = $10.00 |
-| Leverage default | 5x |
+| Risiko default | 1.5% ekuitas (baseline paper sekarang mulai dari $70) |
+| Batas maksimum | 2.5% (batas config) |
+| Leverage default | 6x |
 | Leverage maksimum | 10x |
 | Minimal notional | $5 (minimum Binance) |
 
@@ -176,7 +177,7 @@ Ukuran posisi dihitung menggunakan **fractional Kelly** (quarter-Kelly) — form
 | **Trailing Stop** | ATR × 1.5 ratchet (hanya bergerak searah profit) | Tutup sisa posisi |
 | **Max Hold** | 48 jam sejak entry | Tutup semua — jangan tahan terlalu lama |
 
-**Contoh konkret** (long $500, entry $100, SL $98.50):
+**Contoh konkret** (long $70, entry $100, SL $98.50):
 - R distance = $1.50
 - TP1 = $102.25 → tutup 50%, SL naik ke $100
 - TP2 = $103.00 → tutup 30% sisa
@@ -209,7 +210,7 @@ Bot memiliki beberapa lapisan perlindungan otomatis:
 | Guard | Batas | Aksi |
 |---|---|---|
 | Batas rugi harian | -5% ekuitas (-$25) | Berhenti trading hari itu |
-| Maksimum drawdown | -15% ekuitas (-$75) | Berhenti trading |
+| Maksimum drawdown | -20% ekuitas | Berhenti trading |
 | Kekalahan berturut-turut | 3 kali berturut-turut | Jeda sementara |
 | Volatilitas ekstrem | ATR × 3.0 | Jeda sementara |
 | Minimum R:R ratio | 2.0 | Blokir trade |
@@ -295,7 +296,7 @@ State tersimpan di: `models/shadow_state.json` (tidak hilang saat restart)
 
 | Mode | Deskripsi |
 |---|---|
-| `paper` | Ekuitas virtual $500, API testnet Binance, tidak ada order nyata |
+| `paper` | Ekuitas virtual $70, API testnet Binance, tidak ada order nyata |
 | `live` | Modal nyata, API mainnet Binance, `testnet: false` wajib |
 | `backtest` | Replay data historis OHLCV |
 
@@ -333,7 +334,7 @@ python -m src --config path/ke/config.yaml # config kustom
 |---|---|
 | Trade dibuka | Saat order terisi |
 | Trade ditutup | Saat exit — dengan PnL, alasan, MFE/MAE |
-| Heartbeat | Setiap 60 menit — ekuitas, drawdown, daily PnL, posisi aktif |
+| Heartbeat | Setiap 1 menit pada konfigurasi saat ini — ekuitas, drawdown, daily PnL, posisi aktif |
 | Laporan Fund Manager | Setiap 10 trade tertutup — Sharpe, win rate, profit factor, bonus Jim |
 | Live readiness | Saat semua 7 kriteria terpenuhi |
 
@@ -391,33 +392,36 @@ logs/
 ```yaml
 trading:
   mode: paper                      # paper | live | backtest
-  paper_starting_equity: 500       # Ekuitas virtual $500
-  min_score_threshold: 60          # Skor minimum untuk trade
+  paper_starting_equity: 70        # Ekuitas virtual $70
+  min_score_threshold: 42          # Skor minimum untuk trade
   max_open_trades: 2               # Maksimum 2 posisi sekaligus
   regime_thresholds:
-    trending_expansion: 55         # Lebih permisif di tren kuat
-    accumulation_compression: 65   # Lebih ketat di sideways
+    trending_expansion: 50         # Lebih permisif di tren kuat
+    accumulation_compression: 50   # Lebih ketat di sideways
+    distribution: 52               # Short reversal lebih berisiko
 ```
 
 ### Risiko
 ```yaml
 risk:
-  risk_per_trade_pct: 1.5          # 1.5% ekuitas per trade = $7.50
-  max_risk_per_trade_pct: 2.0      # Hard cap $10.00 per trade
+  risk_per_trade_pct: 1.5          # 1.5% ekuitas per trade
+  max_risk_per_trade_pct: 2.5      # Hard cap 2.5% per trade
   daily_loss_cap_pct: 5.0          # Berhenti jika rugi $25/hari
-  max_drawdown_pct: 15.0           # Berhenti jika drawdown $75
+  max_drawdown_pct: 20.0           # Berhenti jika drawdown mencapai batas konfigurasi
   min_rr_ratio: 2.0                # Minimum R:R 2:1
-  default_leverage: 5              # 5x leverage default
+  default_leverage: 6              # 6x leverage default
 ```
 
 ### Exit
 ```yaml
 exit:
   tp1_r_multiple: 1.5              # TP1 di 1.5R
-  tp2_r_multiple: 2.0              # TP2 di 2.0R
-  tp1_size_pct: 0.50               # Tutup 50% di TP1
+  tp2_r_multiple: 2.5              # TP2 di 2.5R
+  tp1_size_pct: 0.40               # Tutup 40% di TP1
   tp2_size_pct: 0.30               # Tutup 30% di TP2
-  trailing_atr_multiplier: 1.5     # Trailing stop = ATR × 1.5
+  trail_size_pct: 0.30             # Tutup 30% sisanya di trailing
+  breakeven_trigger_r: 0.8         # Pindah ke breakeven lebih cepat
+  trailing_atr_multiplier: 1.3     # Trailing stop = ATR × 1.3
   max_hold_duration_s: 172800      # Maksimum hold 48 jam
 ```
 

@@ -36,7 +36,7 @@ class StrategyRouter:
         s = cfg.get("strategy", {})
         self._trend_min = float(s.get("trend_min_score", 62.0))
         self._trend_sq_min = float(s.get("trend_min_structure", 58.0))
-        self._trend_long_only = bool(s.get("trend_long_only", True))
+        self._trend_long_only = False  # UPGRADED: both directions valid per momentum research
         self._enable_compression_breakout = bool(s.get("enable_compression_breakout", False))
         self._compression_sq_min = float(s.get("compression_min_structure", 60.0))
         self._reversal_vol_max = float(s.get("reversal_max_volatility", 75.0))
@@ -305,16 +305,17 @@ class StrategyRouter:
         threshold_shift = 0.0
         ranking_bonus = 0.0
         reason = "no validated sleeve"
-        if is_short and not self._allow_short_reversal:
-            reason = "short side parked until reversal expectancy proves positive"
+        if is_short and not self._allow_short_reversal and not self._trend_long_only:
+            # Shorts are fully enabled but no specific sleeve qualified —
+            # treat same as long neutral (no directional penalty)
+            reason = "short neutral — no sleeve matched but direction active"
+            score_mult = 0.93
+            size_mult = 0.85
+        elif is_short and not self._allow_short_reversal:
+            reason = "short side parked — reversal not enabled"
             score_mult = 0.88
             size_mult = 0.75
             threshold_shift = 2.0
-        elif is_short and not is_reversal:
-            reason = "short side restricted to high-conviction reversal sleeve"
-            score_mult = 0.90
-            size_mult = 0.78
-            threshold_shift = 1.5
         elif direction == "none":
             reason = "no directional edge"
             score_mult = 0.85

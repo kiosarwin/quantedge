@@ -21,7 +21,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from src.analysis.indicators import atr, rsi, ema, volume_ratio, buy_volume_ratio
+from src.analysis.indicators import atr, rsi, ema, volume_ratio, buy_volume_ratio, vwap_distance_pct, volatility_managed_momentum
 from src.analysis.structure import detect_bos, detect_liquidity_sweep, get_recent_swing_levels
 from src.analysis.order_book import bid_ask_imbalance
 
@@ -39,11 +39,14 @@ class FeatureVector:
     order_flow_imbalance: float     # −100 to +100
     liquidation_pressure: float     # 0–100
     market_structure: str           # 'bullish_bos' | 'bearish_bos' | 'none'
+    # NEW: VWAP and volatility-managed momentum
+    vwap_distance: float = 0.0     # % distance from VWAP (positive=above)
+    vol_managed_momentum: float = 0.0  # -100 to +100, vol-scaled
 
     def directional_alignment(self, direction: str) -> float:
         """
         Returns a 0–1 alignment score: how much this feature vector supports
-        the proposed trade direction.
+        the proposed trade direction. Includes VWAP and vol-managed momentum.
         """
         if direction == "long":
             m = (self.momentum_strength + 100) / 200       # 0–1 (higher = more bullish)
@@ -52,6 +55,10 @@ class FeatureVector:
             struct = 1.0 if self.market_structure in ("bullish_bos",) else (
                 0.5 if self.market_structure == "none" else 0.2
             )
+            # VWAP: above = bullish alignment
+            vwap_align = min(1.0, max(0.0, self.vwap_distance / 2.0 + 0.5))
+            # Vol-managed momentum: positive = bullish
+            vmm = (self.vol_managed_momentum + 100) / 200
         else:  # short
             m = (100 - self.momentum_strength) / 200
             ob = (100 - self.order_flow_imbalance) / 200
@@ -59,7 +66,12 @@ class FeatureVector:
             struct = 1.0 if self.market_structure in ("bearish_bos",) else (
                 0.5 if self.market_structure == "none" else 0.2
             )
-        return round((m * 0.3 + ob * 0.2 + oi * 0.3 + struct * 0.2), 4)
+            vwap_align = min(1.0, max(0.0, -self.vwap_distance / 2.0 + 0.5))
+            vmm = (100 - self.vol_managed_momentum) / 200
+        return round(
+            m * 0.20 + ob * 0.15 + oi * 0.20 + struct * 0.20 + vwap_align * 0.15 + vmm * 0.10,
+            4,
+        )
 
 
 def build_feature_vector(
@@ -160,6 +172,22 @@ def build_feature_vector(
     extreme = cfg.get("smart_money", {}).get("funding_extreme_threshold", 0.05)
     funding_dev = float(np.clip(funding_rate / extreme, -1.0, 1.0))
 
+    # ── VWAP distance (Zarattini & Aziz SSRN:4631351) ────────────────
+    vwap_dist = 0.0
+    if len(df_primary) >= 25:
+        try:
+            vwap_dist = vwap_distance_pct(df_primary, period=20)
+        except Exception:
+            pass
+
+    # ── Volatility-managed momentum (Moreira & Muir 2017) ────────────
+    vmm = 0.0
+    if len(df_primary) >= max(ema_fast, ema_slow) + 5:
+        try:
+            vmm = volatility_managed_momentum(df_primary, cfg)
+        except Exception:
+            pass
+
     return FeatureVector(
         symbol=symbol,
         volatility_regime=round(vol_regime, 2),
@@ -170,6 +198,8 @@ def build_feature_vector(
         order_flow_imbalance=round(order_flow_imbalance, 2),
         liquidation_pressure=round(liq_pressure, 2),
         market_structure=market_structure,
+        vwap_distance=round(vwap_dist, 4),
+        vol_managed_momentum=round(vmm, 2),
     )
 
 

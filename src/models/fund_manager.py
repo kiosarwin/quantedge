@@ -315,61 +315,117 @@ class FundManager:
     # ── Multiplier components ─────────────────────────────────────────────────
 
     def _conviction_mult(self, b: "SignalBreakdown") -> float:
-        """Signal quality: score + gates + EV magnitude."""
+        """
+        Signal quality: score + gates + EV magnitude.
+
+        UPGRADED: More aggressive tiers — the old system gave 1.0x to a score=63
+        setup which is already a good signal. Now a score=55 with positive EV
+        still gets 1.0x (baseline), and high-conviction gets up to 1.80x.
+
+        Rationale: The EV model + regime + smart money gates already filter
+        garbage. If a signal passes all gates, it DESERVES to be sized properly.
+        The conviction multiplier's job is to differentiate GREAT from GOOD,
+        not to handicap everything that isn't perfect.
+        """
         score  = b.total_score
         gates  = int(b.regime_ok) + int(b.smart_money_ok) + int(b.ev_ok)
         ev_pct = b.ev_result.ev_net_pct if b.ev_result else 0.0
         p_win  = b.ev_result.p_win if b.ev_result else 0.52
+        confidence = b.ev_result.confidence if b.ev_result else 0.4
 
-        if score >= 88 and gates == 3 and ev_pct > 0.40 and p_win >= 0.60:
-            return 1.60
-        elif score >= 82 and gates == 3 and ev_pct > 0.25:
-            return 1.40
-        elif score >= 76 and gates == 3:
-            return 1.25
-        elif score >= 70 and gates >= 2 and ev_pct > 0:
-            return 1.10
-        elif score >= 63 and gates >= 2:
+        # Tier 1: ELITE — everything aligned, proven edge, max size
+        if score >= 82 and gates == 3 and ev_pct > 0.30 and p_win >= 0.58 and confidence >= 0.7:
+            return 1.80
+        # Tier 2: HIGH CONVICTION — strong signal with positive EV
+        elif score >= 75 and gates == 3 and ev_pct > 0.15 and p_win >= 0.52:
+            return 1.50
+        # Tier 3: SOLID — good score, gates passing, EV positive
+        elif score >= 65 and gates == 3 and ev_pct > 0.05:
+            return 1.30
+        # Tier 4: ACCEPTABLE — passes threshold, at least 2 gates
+        elif score >= 55 and gates >= 2 and ev_pct > 0:
+            return 1.15
+        # Tier 5: MARGINAL — barely qualifying
+        elif score >= 45 and gates >= 2:
             return 1.00
+        # Below threshold — should rarely reach here due to upstream filters
         else:
-            return 0.85
+            return 0.80
 
     def _streak_mult(self, wins: int, losses: int) -> float:
-        """Anti-martingale: cut size after losses, ride winning streaks."""
-        if losses >= 2:
-            return 0.70
+        """
+        Anti-martingale: cut size after losses, ride winning streaks HARD.
+
+        UPGRADED: More aggressive on winning streaks. When the system is hot,
+        the data says to push — this is the core of anti-martingale sizing
+        (Vince 1992, "The Mathematics of Money Management").
+        """
+        if losses >= 3:
+            return 0.60   # 3+ losses: hard cut, protect capital
+        elif losses >= 2:
+            return 0.75
         elif losses == 1:
-            return 0.85
-        elif wins >= 6:
-            return 1.35
+            return 0.88
+        elif wins >= 7:
+            return 1.50   # 7+ wins: system is ON FIRE — press hard
+        elif wins >= 5:
+            return 1.40
         elif wins >= 4:
-            return 1.25
+            return 1.30
         elif wins >= 3:
-            return 1.15
+            return 1.20
         elif wins >= 2:
-            return 1.08
+            return 1.12
+        elif wins >= 1:
+            return 1.05
         return 1.00
 
     def _regime_mult(self, b: "SignalBreakdown") -> float:
-        """Trending markets reward trend-following. Chaos punishes it."""
+        """
+        Regime-direction aware sizing.
+
+        UPGRADED: Distribution regime is no longer universally penalized.
+        If you're SHORT in distribution, that's a HIGH-EDGE setup (institutional
+        selling pressure). Only penalize if direction conflicts with regime.
+        """
         regime   = b.regime.value if b.regime else "chaos"
         sm_phase = b.smart_money.phase.value if b.smart_money else "neutral"
-        base = {
-            "trending_expansion":       1.20,
-            "accumulation_compression": 1.00,
-            "distribution":             0.80,
-            "chaos":                    0.55,
-        }.get(regime, 1.00)
+        direction = b.direction
 
-        if sm_phase in ("trending", "accumulation"):
-            base = min(base * 1.10, 1.30)
-        elif sm_phase == "distribution":
-            base *= 0.90
+        # Direction-aware regime scoring
+        if regime == "trending_expansion":
+            base = 1.25  # Upgraded from 1.20
+        elif regime == "accumulation_compression":
+            base = 1.05  # Upgraded from 1.00
+        elif regime == "distribution":
+            if direction == "short":
+                base = 1.20  # HIGH: shorts in distribution are premium setups
+            else:
+                base = 0.70  # Penalize longs fighting distribution
+        elif regime == "chaos":
+            base = 0.50  # Reduced from 0.55 — chaos is truly dangerous
+        else:
+            base = 1.00
+
+        # Smart money alignment bonus
+        if sm_phase in ("trending", "accumulation") and direction == "long":
+            base = min(base * 1.12, 1.40)
+        elif sm_phase == "distribution" and direction == "short":
+            base = min(base * 1.12, 1.40)  # NEW: SM confirms short direction
+        elif sm_phase == "liquidity_sweep":
+            base = min(base * 1.08, 1.35)  # Sweeps are high-conviction reversals
+        elif sm_phase == "distribution" and direction == "long":
+            base *= 0.85  # Fighting SM direction
 
         return round(base, 3)
 
     def _recent_performance_mult(self, trade_log: list["TradeRecord"]) -> float:
-        """Last 15 trades profit factor — overall system momentum."""
+        """
+        Last 15 trades profit factor — overall system momentum.
+
+        UPGRADED: More aggressive scaling on proven performance.
+        If last 15 trades show PF > 2, the system is working — SIZE UP.
+        """
         if len(trade_log) < 5:
             return 1.0
         recent = trade_log[-15:]
@@ -379,13 +435,16 @@ class FundManager:
         gl     = abs(sum(t.pnl_usd for t in losses)) or 0.001
         pf     = gp / gl
 
-        if pf >= 4.0:   return 1.30
-        elif pf >= 3.0: return 1.20
-        elif pf >= 2.0: return 1.12
-        elif pf >= 1.5: return 1.06
+        if pf >= 5.0:   return 1.45  # System is crushing it
+        elif pf >= 3.5: return 1.35
+        elif pf >= 2.5: return 1.25
+        elif pf >= 2.0: return 1.18
+        elif pf >= 1.5: return 1.10
+        elif pf >= 1.2: return 1.05
         elif pf >= 1.0: return 1.00
-        elif pf >= 0.7: return 0.90
-        else:           return 0.80
+        elif pf >= 0.8: return 0.88
+        elif pf >= 0.6: return 0.75
+        else:           return 0.65  # System bleeding — cut hard
 
     def _portfolio_heat_mult(self, open_risk_pct: float, open_trade_count: int) -> float:
         """

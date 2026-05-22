@@ -246,6 +246,11 @@ class Scorer:
         return self._clamp_score(50.0 + signed * 0.70)
 
     def _trend_base_score(self, breakdown: SignalBreakdown) -> float:
+        """
+        Trend-following base score. BOTH long and short are first-class.
+        Ref: Jegadeesh & Titman (1993) — momentum persistence applies to both
+        directions; crypto exhibits strong short-horizon momentum (Dobrynskaya 2023).
+        """
         momentum = self._directional_momentum_score(breakdown)
         sm_score = self._directional_smart_money_score(breakdown)
         base = (
@@ -265,8 +270,8 @@ class Scorer:
         sm = breakdown.smart_money
         if sm is not None and sm.phase.value in {"trending", "accumulation"}:
             base += 4.0
-        if breakdown.direction == "short":
-            base -= 8.0
+        # NO direction penalty — shorts in trending regime are equally valid
+        # when structure confirms bearish BOS (per momentum literature)
         return self._clamp_score(base)
 
     def _reversal_base_score(self, breakdown: SignalBreakdown) -> float:

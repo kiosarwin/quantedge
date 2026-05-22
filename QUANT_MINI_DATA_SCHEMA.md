@@ -51,6 +51,8 @@
 | `veto_reason` | string | system | tidak | Alasan reject bila ada |
 | `size_multiplier_breakdown` | object/string | fund/risk/ML | ya | Jejak sizing |
 
+> Catatan: runtime saat ini juga memakai `AdaptiveBrain` sebagai overlay sizing dan pair-health. Nama field `ml_*` tetap dipertahankan untuk kompatibilitas log dan dataset.
+
 ## 5) Outcome
 
 | Field | Tipe | Sumber | Wajib | Catatan |

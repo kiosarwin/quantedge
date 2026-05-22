@@ -31,7 +31,8 @@ Scanner → Scorer → Risk / EV Gate → Executor → TradeManager
 | Trade Manager | `execution/trade_manager.py` | Monitors open trades, manages exits, MFE/MAE tracking |
 | Learner | `learning/learner.py` | Records trades, adjusts signal weights over time |
 | EV Model | `models/ev_model.py` | Probabilistic expected value gate |
-| ML Engine | `models/ml_engine.py` | Live readiness checker, fund manager reporting |
+| Adaptive Brain | `models/adaptive_brain.py` | Active sizing overlay, pair-health veto, online learning |
+| ML Engine | `models/ml_engine.py` | Passive predictor interface and live readiness helper |
 | Fund Manager | `models/fund_manager.py` | Sharpe, Calmar, profit factor reporting |
 | Shadow Engine | `backtest/shadow_engine.py` | Ghost trades running in parallel to build ML data faster |
 | Dataset Logger | `data/dataset_logger.py` | Writes 85-column parquet dataset for future ML training |
@@ -95,10 +96,10 @@ A signal must appear on **2 consecutive scans** (2 × 60s = 2 minutes) before an
 - Scaled into 2 levels: 60% first, 40% second
 
 ### Risk per trade
-- Default: 1.5% of equity ($7.50 at $500)
-- Hard cap: 2.0% ($10.00)
+- Default: 1.5% of equity (paper baseline now seeds from $70)
+- Hard cap: 2.5% (config cap)
 - Position sized via fractional Kelly (quarter-Kelly, capped at 3%)
-- Leverage: 5x default, up to 10x
+- Leverage: 6x default, up to 10x
 - Min notional: $5 (Binance minimum)
 
 ### Exit levels
@@ -124,7 +125,7 @@ Every open trade tracks in real time:
 | Guard | Threshold | Action |
 |---|---|---|
 | Daily loss cap | -5% equity ($25) | Stop trading for the day |
-| Max drawdown | -15% equity ($75) | Stop trading |
+| Max drawdown | -20% equity | Stop trading |
 | Consecutive losses | 3 in a row | Pause |
 | Extreme volatility | ATR × 3.0 | Pause |
 | Min R:R ratio | 2.0 | Block trade |
@@ -177,7 +178,7 @@ Runs parallel "ghost trades" at a lower score threshold (no capital at risk). Ac
 **Infrastructure:** GCP e2-micro, `systemd` service `ninja-watchdog`
 
 **Modes:**
-- `paper` — virtual $500 equity, real Binance testnet API, no real orders
+- `paper` — virtual $70 equity, real Binance testnet API, no real orders
 - `live` — real capital, requires mainnet API keys, `testnet: false`
 - `backtest` — historical OHLCV replay
 
@@ -254,7 +255,7 @@ logs/
 |---|---|
 | Trade opened | On entry fill |
 | Trade closed | On exit with PnL, exit reason, MFE/MAE |
-| Heartbeat | Every 60 minutes — equity, drawdown, daily PnL, open positions |
+| Heartbeat | Every 1 minute in current config — equity, drawdown, daily PnL, open positions |
 | Fund manager report | Every 10 closed trades — Sharpe, win rate, profit factor, Jim's bonus |
 | Live readiness | When all 7 criteria pass |
 

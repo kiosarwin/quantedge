@@ -1,6 +1,6 @@
 # Roadmap Quant Mini
 
-> Tujuan dokumen ini adalah menjelaskan jalur transisi dari bot rule-based + ML helper saat ini menuju sistem keputusan tunggal yang lebih mendekati **quant mini**: satu layer keputusan utama, dengan beberapa lapisan risiko sebagai pengaman.
+> Tujuan dokumen ini adalah menjelaskan jalur transisi dari bot rule-based + adaptive overlays saat ini menuju sistem keputusan tunggal yang lebih mendekati **quant mini**: satu layer keputusan utama, dengan beberapa lapisan risiko sebagai pengaman.
 >
 > Dokumen pendamping:
 > - [`QUANT_MINI_CHECKLIST.md`](./QUANT_MINI_CHECKLIST.md)
@@ -21,6 +21,8 @@ Dengan kata lain:
 - **ML/AI** menjadi lapisan keputusan utama
 - **rule engine** menjadi penyedia fitur dan guardrail
 - **risk manager** menjadi pagar keras
+
+Status saat ini masih di tengah jalan: `AdaptiveBrain` sudah aktif sebagai overlay sizing dan pair-health, sementara `MLPredictor` tetap pasif. Single brain masih target, bukan kondisi sekarang.
 
 Sampai migrasi penuh selesai, sleeve alpha operasional tetap dibaca sebagai `trend_following`, `reversal`, dan `compression_breakout`; `neutral` adalah state routing residual, bukan alpha.
 
