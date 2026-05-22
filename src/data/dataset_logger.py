@@ -23,6 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from src.session_clock import active_market_session_key
+
 log = logging.getLogger(__name__)
 
 NEAR_MISS_FLOOR = 55.0      # min score to log a no-trade row
@@ -34,19 +36,25 @@ _REGIME_MAP = {
     "distribution": 1,
     "chaos": 0,
 }
-_SESSION_HOURS = {
-    range(0, 8):   "asia",
-    range(8, 13):  "london",
-    range(13, 17): "overlap_london_ny",
-    range(17, 24): "ny",
-}
 
 
-def _session(hour: int) -> str:
-    for rng, name in _SESSION_HOURS.items():
-        if hour in rng:
-            return name
-    return "ny"
+def _session_from_utc(dt_utc: datetime) -> str:
+    """Canonical session bucket for a UTC timestamp.
+
+    The whole codebase keys session attribution off
+    ``session_clock.active_market_session_key`` (Asia/Makassar / WITA).
+    Historically this module rolled its own UTC-hour table with
+    different cutoffs, which produced the same string vocabulary but
+    misaligned bucket boundaries — TradeRecord.session and the parquet
+    row for the same trade could disagree by ~1-2 hours.
+
+    Funnel everything through ``active_market_session_key`` so per-
+    session attribution lines up across TradeRecord, dataset_logger,
+    cohort attribution, and the Telegram cycle report.
+    """
+    if dt_utc.tzinfo is None:
+        dt_utc = dt_utc.replace(tzinfo=timezone.utc)
+    return active_market_session_key(dt_utc)
 
 
 @dataclass
@@ -198,7 +206,7 @@ def _extract_signal_fields(bd, snap, score_threshold: float) -> dict:
         opened_at=now,
         hour_of_day=dt.hour,
         day_of_week=dt.weekday(),
-        session=_session(dt.hour),
+        session=_session_from_utc(dt),
 
         # Signal
         total_score=bd.total_score,
