@@ -92,12 +92,31 @@ Digunakan ketika:
 
 - smart money mendeteksi `liquidity_sweep`
 - atau regime = `distribution` dengan konteks smart money yang cocok untuk reversal
+- atau detektor short-setup khusus (Phase D / Liq Sweep) memberi sinyal high-confidence
 
 Efek pada sistem:
 
 - memberi tambahan score sedang
 - ukuran default lebih kecil
 - bisa memperoleh prioritas relatif lebih tinggi saat dispersion ekstrem
+
+#### Sub-sleeve: short setup khusus (Phase D / Liq Sweep)
+
+Diadopsi dari `kiosarwin/Futures` di mana cohort `IMMINENT_DUMP + PHASE_D`
+dan `IMMINENT_DUMP + LIQ_SWEEP` adalah edge statistik utama bot tersebut.
+Detektor ada di `src/analysis/short_strategies.py`.
+
+- `phase_d` — Wyckoff Sign of Weakness. Menembus support distribusi (close
+  di bawah 25th-percentile low 30 bar), dikonfirmasi oleh volume spike atau
+  cross EMA 9/21 bearish, dengan stack EMA bearish (`close < ema_21 < ema_50`).
+- `liq_sweep` — bearish stop hunt di atas equal-highs. Wick pierce di atas
+  pool likuiditas, lalu close kembali di bawah pool, dengan upper wick panjang
+  dan body bearish.
+
+Sinyal high-confidence (default ≥ 0.65) dirutekan ke sleeve `reversal`
+tanpa memerlukan `regime=='distribution'` — ini justru *transition* dari
+distribusi ke markdown. Floor volatilitas, struktur, dan partisipasi tetap
+diperiksa sehingga setup berkualitas rendah tidak masuk.
 
 ## Rule Table Operasional
 

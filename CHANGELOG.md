@@ -4,6 +4,56 @@
 
 ---
 
+## [Unreleased] — short-side post-distribution edges (Phase D + Liq Sweep)
+
+### Added — short setup detectors ported from `kiosarwin/Futures`
+- `src/analysis/short_strategies.py`: standalone module exposing
+  `detect_phase_d_short()` and `detect_liq_sweep_short()` with a public
+  `detect_short_entry()` dispatcher. These are direct ports of `_sow()`
+  (Wyckoff Phase D) and `_liquidity_sweep()` (LIQ_SWEEP_HIGH) from
+  `Futures/src/engines/dump_detector.py`, where the cohorts
+  `IMMINENT_DUMP + PHASE_D` and `IMMINENT_DUMP + LIQ_SWEEP` are the bot's
+  primary statistical edge.
+- `SignalBreakdown.short_setup`: new optional field carrying the
+  `ShortEntrySignal` so downstream layers (router, attribution, reporting)
+  can see which dedicated edge fired.
+- `StrategyRouter.is_short_setup_candidate()` / `short_setup_label()`:
+  new acceptance path that routes a high-confidence Phase D / Liq Sweep
+  short to the `reversal` sleeve **without** requiring
+  `regime=='distribution'` (Phase D *is* the post-distribution
+  breakdown). Existing volatility, structure, OI/volume floors still apply.
+- `Scorer.score()`: runs the detector only for `direction=='short'`
+  candidates, attaches the result to the breakdown, and unblocks the
+  regime gate when distribution flips into markdown plus the SM gate
+  when the smart-money detector returned NEUTRAL (no info, not a
+  contradiction).
+
+### Changed — config
+- `config/config.yaml` (`strategy:` section): added `enable_short_setups`,
+  `short_setup_min_confidence` (0.65), `short_setup_min_structure` (50),
+  `short_setup_max_volatility` (85), and tunable `phase_d.*` / `liq_sweep.*`
+  parameter blocks. Defaults are conservative — Phase D requires a real
+  support break confirmed by either a volume spike or an EMA 9/21 bearish
+  cross; Liq Sweep requires equal-highs pierce + close back inside.
+
+### Tests
+- `tests/test_short_strategies.py`: 9 cases covering both detectors plus
+  the public dispatcher (positive/negative paths, master-disable flag,
+  short-data guard, dispatcher tie-break).
+- `tests/test_strategy_router.py`: 5 new cases for the short-setup
+  admission path (routes to reversal outside `distribution` regime,
+  confidence threshold, master-disable, label exposure, structure floor).
+
+### Notes
+- This change is **additive**: existing long sleeves and short reversal
+  paths are untouched; the dedicated short-setup path only fires when
+  the new detector returns a high-confidence signal.
+- No exit-engine changes. Stop-loss inside the detector is for downstream
+  use only; the live executor still derives SL from `risk.stop_loss_atr_multiplier`.
+- `Futures` repo is **not modified** — this PR only changes ninja-trader.
+
+---
+
 ## [Unreleased] — 2026-05-22 — Futures-only + Aggressive-edge upgrade layer
 
 ### Removed (spot pipeline retired)

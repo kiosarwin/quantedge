@@ -48,6 +48,19 @@ class StrategyRouter:
         self._short_reversal_min_sm_score = float(s.get("short_reversal_min_sm_score", 85.0))
         self._short_reversal_min_structure = float(s.get("short_reversal_min_structure", 62.0))
         self._short_reversal_min_volume = float(s.get("short_reversal_min_volume", 45.0))
+        # Dedicated post-distribution short setups (Phase D / Liq Sweep) ported
+        # from `kiosarwin/Futures`. These admit shorts via a price-structure
+        # thesis that does not depend on `regime=='distribution'`.
+        self._enable_short_setups = bool(s.get("enable_short_setups", True))
+        self._short_setup_min_confidence = float(
+            s.get("short_setup_min_confidence", 0.65)
+        )
+        self._short_setup_min_structure = float(
+            s.get("short_setup_min_structure", 50.0)
+        )
+        self._short_setup_max_volatility = float(
+            s.get("short_setup_max_volatility", 85.0)
+        )
         self._dispersion_warn = float(s.get("dispersion_warn", 28.0))
         self._dispersion_high = float(s.get("dispersion_high", 38.0))
 
@@ -119,6 +132,40 @@ class StrategyRouter:
             )
         )
 
+    def is_short_setup_candidate(self, breakdown) -> bool:
+        """Admit a short via the dedicated Phase D / Liq Sweep detector.
+
+        These are the post-distribution short edges ported from
+        ``kiosarwin/Futures``. They encode the breakdown thesis directly
+        from price structure, so they admit shorts without requiring
+        ``regime=='distribution'`` or smart-money DISTRIBUTION/LIQ_SWEEP
+        phases. The standard volatility, OI, and volume floors still apply
+        so that low-quality candles cannot smuggle through.
+        """
+        if not (self._enable_short_setups and self._allow_short_reversal):
+            return False
+        if breakdown.direction != "short":
+            return False
+        setup = getattr(breakdown, "short_setup", None)
+        if setup is None or not getattr(setup, "is_valid", False):
+            return False
+        if float(getattr(setup, "confidence", 0.0)) < self._short_setup_min_confidence:
+            return False
+        if float(getattr(breakdown, "structure_quality", 0.0)) < self._short_setup_min_structure:
+            return False
+        if float(getattr(breakdown, "volatility", 0.0)) > self._short_setup_max_volatility:
+            return False
+        if not self._reversal_is_supported(breakdown):
+            return False
+        return True
+
+    def short_setup_label(self, breakdown) -> str:
+        """Return the dedicated short-setup label (e.g. 'phase_d') or '' if absent."""
+        setup = getattr(breakdown, "short_setup", None)
+        if setup is None or not getattr(setup, "is_valid", False):
+            return ""
+        return str(getattr(setup, "label", ""))
+
     def classify_dispersion(self, breakdowns: list) -> DispersionState:
         vals = []
         for b in breakdowns:
@@ -167,14 +214,23 @@ class StrategyRouter:
 
         is_long_reversal = self.is_long_reversal_candidate(breakdown)
         is_short_reversal = self.is_short_reversal_candidate(breakdown)
-        is_reversal = is_long_reversal or is_short_reversal
+        is_short_setup = self.is_short_setup_candidate(breakdown)
+        is_reversal = is_long_reversal or is_short_reversal or is_short_setup
 
         if is_reversal:
             score_mult = 1.08
             size_mult = 0.75
             threshold_shift = -2.0
             ranking_bonus = 4.0
-            if is_short_reversal:
+            if is_short_setup:
+                label = self.short_setup_label(breakdown) or "phase_d"
+                reason = f"short setup sleeve via {label}"
+                # Phase D / Liq Sweep are the bot's primary statistical edge
+                # cohorts in kiosarwin/Futures. Give them a slightly larger
+                # ranking bonus so they surface ahead of generic reversal
+                # candidates when both fire on the same scan.
+                ranking_bonus += 1.5
+            elif is_short_reversal:
                 reason = f"short reversal sleeve via {sm} sm={sm_score:.0f}"
             else:
                 reason = f"reversal sleeve via {sm}"

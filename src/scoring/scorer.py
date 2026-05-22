@@ -31,6 +31,7 @@ from src.analysis.structure import (
 from src.analysis.order_book import order_book_score
 from src.analysis.sentiment import funding_sentiment_score, open_interest_score
 from src.analysis.smart_money import detect_smart_money, SmartMoneySignal, SmartMoneyPhase
+from src.analysis.short_strategies import detect_short_entry, ShortEntrySignal, ShortStrategy
 from src.analysis.feature_engine import build_feature_vector, FeatureVector
 from src.analysis.spot_context import SpotContext, compute_spot_mult
 from src.models.ev_model import EVResult
@@ -70,6 +71,7 @@ class SignalBreakdown:
     edge_result: EdgeResult | None = None
     feature_vector: FeatureVector | None = None
     spot_context: SpotContext | None = None
+    short_setup: ShortEntrySignal | None = None
 
     weights_used: dict = field(default_factory=dict)
     strategy_sleeve: str = "neutral"
@@ -452,6 +454,41 @@ class Scorer:
             ):
                 regime_ok = True
 
+        # ── Phase D / Liq Sweep dedicated short setup detector ─────────
+        # These are the proven post-distribution short edges from
+        # `kiosarwin/Futures` (cohort: IMMINENT_DUMP + PHASE_D / LIQ_SWEEP).
+        # Detection runs only for short candidates and is purely informational
+        # here — the StrategyRouter consumes `breakdown.short_setup` to decide
+        # whether to admit the trade via the reversal sleeve.
+        short_setup: ShortEntrySignal | None = None
+        if direction == "short":
+            try:
+                setup = detect_short_entry(df_primary, self._cfg)
+                if setup.is_valid:
+                    short_setup = setup
+                    # Phase D / Liq Sweep encode the post-distribution
+                    # breakdown thesis themselves; if the regime classifier
+                    # tagged this candle as `distribution` and the dedicated
+                    # detector fires, the regime gate is no longer the right
+                    # blocker — the setup-specific structure is.
+                    if not regime_ok and regime.value == "distribution":
+                        regime_ok = True
+            except Exception as exc:
+                log.debug("Short setup detection failed for %s: %s", snapshot.symbol, exc)
+
+        # Smart-money alignment is normally enforced via OI / funding / sweeps,
+        # but Phase D and Liq Sweep have their own price-structure thesis. When
+        # a high-confidence dedicated short_setup fires and the SM detector
+        # only returned NEUTRAL (no info — not a contradiction), unblock the
+        # SM gate so the dedicated edge can express itself.
+        if (
+            short_setup is not None
+            and not smart_money_ok
+            and sm_signal is not None
+            and sm_signal.phase == SmartMoneyPhase.NEUTRAL
+        ):
+            smart_money_ok = True
+
         # ── 5. EV model gate (setup-specific p_win via PwinEngine) ─────
         ev_result = None
         ev_ok = False
@@ -606,6 +643,7 @@ class Scorer:
             ev_result=ev_result,
             feature_vector=fv,
             spot_context=spot_ctx,
+            short_setup=short_setup,
             weights_used=dict(w),
             regime_ok=regime_ok,
             smart_money_ok=smart_money_ok,

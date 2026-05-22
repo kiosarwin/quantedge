@@ -17,10 +17,26 @@ def _cfg():
             "short_reversal_min_sm_score": 85,
             "short_reversal_min_structure": 62,
             "short_reversal_min_volume": 45,
+            "enable_short_setups": True,
+            "short_setup_min_confidence": 0.65,
+            "short_setup_min_structure": 50,
+            "short_setup_max_volatility": 85,
             "dispersion_warn": 28,
             "dispersion_high": 38,
         }
     }
+
+
+def _short_setup(label: str = "phase_d", confidence: float = 0.80):
+    return SimpleNamespace(
+        strategy=SimpleNamespace(value=label),
+        label=label,
+        confidence=confidence,
+        is_valid=True,
+        entry_price=100.0,
+        stop_loss=102.0,
+        notes="test",
+    )
 
 
 def _breakdown(
@@ -35,6 +51,7 @@ def _breakdown(
     funding_sentiment=50.0,
     volatility=25.0,
     trend_strength=72.0,
+    short_setup=None,
 ):
     return SimpleNamespace(
         direction=direction,
@@ -50,6 +67,7 @@ def _breakdown(
         funding_sentiment=funding_sentiment,
         volatility=volatility,
         trend_strength=trend_strength,
+        short_setup=short_setup,
     )
 
 
@@ -136,3 +154,74 @@ def test_strategy_router_identifies_short_reversal_candidate():
         sm_bias="short",
     )
     assert router.is_short_reversal_candidate(breakdown) is True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Phase D / Liq Sweep dedicated short-setup admission path
+# ──────────────────────────────────────────────────────────────────────────────
+
+def test_short_setup_routes_to_reversal_outside_distribution_regime():
+    """A high-confidence Phase D setup should route to reversal even when
+    the regime is not yet `distribution` — this is precisely the post-
+    distribution breakdown case the dedicated detector targets."""
+    router = StrategyRouter(_cfg())
+    breakdown = _breakdown(
+        direction="short",
+        regime="trending_expansion",   # NOT distribution
+        sm_phase="neutral",
+        sm_bias="neutral",
+        sm_score=40.0,
+        structure_quality=60.0,
+        volume_confirmation=50.0,
+        volatility=55.0,
+        short_setup=_short_setup("phase_d", confidence=0.80),
+    )
+    assert router.is_short_setup_candidate(breakdown) is True
+    decision = router.evaluate(breakdown, DispersionState(value=0.0, state="normal"))
+    assert decision.sleeve == "reversal"
+    assert "phase_d" in decision.reason
+
+
+def test_short_setup_below_confidence_threshold_is_rejected():
+    router = StrategyRouter(_cfg())
+    breakdown = _breakdown(
+        direction="short",
+        regime="trending_expansion",
+        sm_phase="neutral",
+        sm_bias="neutral",
+        structure_quality=60.0,
+        short_setup=_short_setup("phase_d", confidence=0.50),
+    )
+    assert router.is_short_setup_candidate(breakdown) is False
+
+
+def test_short_setup_disabled_via_config():
+    cfg = _cfg()
+    cfg["strategy"]["enable_short_setups"] = False
+    router = StrategyRouter(cfg)
+    breakdown = _breakdown(
+        direction="short",
+        regime="trending_expansion",
+        short_setup=_short_setup("liq_sweep", confidence=0.85),
+    )
+    assert router.is_short_setup_candidate(breakdown) is False
+
+
+def test_short_setup_label_returns_strategy_label():
+    router = StrategyRouter(_cfg())
+    breakdown = _breakdown(
+        direction="short",
+        short_setup=_short_setup("liq_sweep", confidence=0.80),
+    )
+    assert router.short_setup_label(breakdown) == "liq_sweep"
+
+
+def test_short_setup_blocked_by_low_structure_quality():
+    router = StrategyRouter(_cfg())
+    breakdown = _breakdown(
+        direction="short",
+        regime="trending_expansion",
+        structure_quality=40.0,        # below the 50 floor
+        short_setup=_short_setup("phase_d", confidence=0.80),
+    )
+    assert router.is_short_setup_candidate(breakdown) is False
