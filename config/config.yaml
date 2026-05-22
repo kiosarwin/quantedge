@@ -303,8 +303,8 @@ safety:
   # Binance API call. Inner enforces aiohttp ClientTimeout; outer enforces
   # asyncio.wait_for. Outer must be >= inner so ccxt surfaces its own
   # TimeoutError before asyncio cancels the coroutine.
-  api_http_timeout_seconds: 12.0         # ccxt -> aiohttp ClientTimeout(total)
-  api_call_timeout_seconds: 15.0         # asyncio.wait_for ceiling per call
+  api_http_timeout_seconds: 20.0         # ccxt -> aiohttp ClientTimeout(total)
+  api_call_timeout_seconds: 30.0         # asyncio.wait_for ceiling per call
   heartbeat_interval_seconds: 30
   auto_live_on_readiness: false          # Manual promotion only after audited forward results
   min_live_balance_usd: 10.0             # Abort live transition if balance below this
