@@ -20,11 +20,18 @@ def _cfg():
     }
 
 
-def _breakdown(direction="long", sleeve="reversal", regime="trending_expansion", sm_phase="liquidity_sweep"):
+def _breakdown(
+    direction="long",
+    sleeve="reversal",
+    regime="trending_expansion",
+    sm_phase="liquidity_sweep",
+    setup_type="sweep_reversal",
+):
     return SimpleNamespace(
         symbol="MITO/USDT:USDT",
         direction=direction,
         strategy_sleeve=sleeve,
+        setup_type=setup_type,
         total_score=73.0,
         regime=SimpleNamespace(value=regime),
         smart_money=SimpleNamespace(phase=SimpleNamespace(value=sm_phase)),
@@ -93,6 +100,8 @@ def test_cohort_policy_uses_attribution_for_blocking_and_bonus():
     assert "attribution block" in decision.reason
 
 
+
+
 def test_cohort_policy_attribution_relief_and_ranking_bonus():
     policy = CohortPolicy(_cfg())
     breakdown = _breakdown(sleeve="trend_following", regime="trending_expansion", sm_phase="trending")
@@ -114,3 +123,128 @@ def test_cohort_policy_attribution_relief_and_ranking_bonus():
     bonus = policy.ranking_bonus_with_attribution(breakdown, [], report)
     assert relief < 0
     assert bonus > 0
+
+
+def test_recommend_symbols_prioritizes_primary_edge_symbols_before_generic_winners():
+    policy = CohortPolicy(_cfg())
+    trades = [
+        SimpleNamespace(
+            symbol="EDGE/USDT:USDT",
+            direction="short",
+            pnl_usd=1.0,
+            regime="distribution",
+            strategy_sleeve="reversal",
+            scores={"setup_type": "sweep_reversal", "sm_phase": "liquidity_sweep", "session": "london"},
+        ),
+        SimpleNamespace(
+            symbol="BIGWIN/USDT:USDT",
+            direction="long",
+            pnl_usd=5.0,
+            regime="trending_expansion",
+            strategy_sleeve="trend_following",
+            scores={"setup_type": "trend_continuation", "sm_phase": "trending", "session": "ny"},
+        ),
+    ]
+
+    priority = policy.recommend_symbols(
+        trades,
+        primary_edge={"key": "reversal|distribution|liquidity_sweep|london|short"},
+    )
+
+    assert priority[:2] == ["EDGE/USDT:USDT", "BIGWIN/USDT:USDT"]
+
+
+def test_recommend_symbols_does_not_prioritize_losing_primary_edge_symbol():
+    policy = CohortPolicy(_cfg())
+    trades = [
+        SimpleNamespace(
+            symbol="EDGE/USDT:USDT",
+            direction="short",
+            pnl_usd=-1.0,
+            regime="distribution",
+            strategy_sleeve="reversal",
+            scores={"setup_type": "sweep_reversal", "sm_phase": "liquidity_sweep", "session": "london"},
+        ),
+        SimpleNamespace(
+            symbol="OK/USDT:USDT",
+            direction="long",
+            pnl_usd=0.5,
+            regime="trending_expansion",
+            strategy_sleeve="trend_following",
+            scores={"setup_type": "trend_continuation", "sm_phase": "trending", "session": "ny"},
+        ),
+    ]
+
+    priority = policy.recommend_symbols(
+        trades,
+        primary_edge={"key": "reversal|distribution|liquidity_sweep|london|short"},
+    )
+
+    assert priority == ["OK/USDT:USDT"]
+
+
+def test_recommend_symbols_ignores_legacy_unknown_context_winners():
+    policy = CohortPolicy(_cfg())
+    trades = [
+        SimpleNamespace(
+            symbol="LEGACY/USDT:USDT",
+            direction="long",
+            pnl_usd=10.0,
+            regime="chaos",
+            strategy_sleeve="",
+            scores={},
+        ),
+        SimpleNamespace(
+            symbol="ALPHA/USDT:USDT",
+            direction="long",
+            pnl_usd=0.25,
+            regime="trending_expansion",
+            strategy_sleeve="trend_following",
+            scores={"setup_type": "trend_continuation", "sm_phase": "trending", "session": "london"},
+        ),
+    ]
+
+    assert policy.recommend_symbols(trades) == ["ALPHA/USDT:USDT"]
+
+
+def test_recommend_symbols_prefers_consistent_symbol_over_one_lucky_win():
+    policy = CohortPolicy(_cfg())
+    trades = [
+        SimpleNamespace(
+            symbol="LUCKY/USDT:USDT",
+            direction="long",
+            pnl_usd=1.0,
+            regime="trending_expansion",
+            strategy_sleeve="trend_following",
+            scores={"setup_type": "trend_continuation", "sm_phase": "trending", "session": "london"},
+        ),
+        SimpleNamespace(
+            symbol="STEADY/USDT:USDT",
+            direction="long",
+            pnl_usd=0.30,
+            regime="trending_expansion",
+            strategy_sleeve="trend_following",
+            scores={"setup_type": "trend_continuation", "sm_phase": "trending", "session": "london"},
+        ),
+        SimpleNamespace(
+            symbol="STEADY/USDT:USDT",
+            direction="long",
+            pnl_usd=0.30,
+            regime="trending_expansion",
+            strategy_sleeve="trend_following",
+            scores={"setup_type": "trend_continuation", "sm_phase": "trending", "session": "london"},
+        ),
+        SimpleNamespace(
+            symbol="STEADY/USDT:USDT",
+            direction="long",
+            pnl_usd=0.30,
+            regime="trending_expansion",
+            strategy_sleeve="trend_following",
+            scores={"setup_type": "trend_continuation", "sm_phase": "trending", "session": "london"},
+        ),
+    ]
+
+    assert policy.recommend_symbols(trades)[:2] == [
+        "STEADY/USDT:USDT",
+        "LUCKY/USDT:USDT",
+    ]

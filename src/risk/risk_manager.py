@@ -5,6 +5,7 @@ Integrates fractional Kelly sizing when EV model data is available.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -12,6 +13,7 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from src.analysis.indicators import atr
+from src.models.strategy_passport import asset_from_symbol, sector_for_asset
 
 if TYPE_CHECKING:
     from src.models.ev_model import EVResult
@@ -50,6 +52,7 @@ class TradeSetup:
     # loaded from older `data/open_trades.json`.
     short_setup_label: str = ""
     short_setup_confidence: float = 0.0
+    setup_passport: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -67,6 +70,7 @@ class PortfolioState:
     kill_switch_reason: str = ""
     symbol_risk_pct: dict[str, float] = field(default_factory=dict)
     direction_risk_pct: dict[str, float] = field(default_factory=dict)
+    sector_risk_pct: dict[str, float] = field(default_factory=dict)
 
     def reset_day(self, equity: float) -> None:
         self.daily_start_equity = equity
@@ -160,7 +164,7 @@ class RiskManager:
 
         return True, "ok"
 
-    def check_trade_exposure(self, symbol: str, direction: str, risk_pct: float) -> tuple[bool, str]:
+    def check_trade_exposure(self, symbol: str, direction: str, risk_pct: float, sector: str = "") -> tuple[bool, str]:
         max_symbol_risk = float(self._risk.get("max_symbol_risk_pct", 0.0) or 0.0)
         if max_symbol_risk > 0:
             current = float(self.state.symbol_risk_pct.get(symbol, 0.0))
@@ -172,6 +176,12 @@ class RiskManager:
             current = float(self.state.direction_risk_pct.get(direction, 0.0))
             if current + risk_pct > max_direction_risk:
                 return False, f"direction exposure cap hit for {direction} ({current + risk_pct:.2f}% > {max_direction_risk:.2f}%)"
+
+        max_sector_risk = float(self._risk.get("max_sector_risk_pct", 0.0) or 0.0)
+        if max_sector_risk > 0 and sector:
+            current = float(self.state.sector_risk_pct.get(sector, 0.0))
+            if current + risk_pct > max_sector_risk:
+                return False, f"sector exposure cap hit for {sector} ({current + risk_pct:.2f}% > {max_sector_risk:.2f}%)"
 
         return True, "ok"
 
@@ -200,6 +210,7 @@ class RiskManager:
         min_notional_usd: float = 0.0,
         short_setup_label: str = "",
         short_setup_confidence: float = 0.0,
+        setup_passport: dict | None = None,
     ) -> TradeSetup | None:
         """
         Returns a fully computed TradeSetup or None if risk/reward insufficient.
@@ -235,6 +246,40 @@ class RiskManager:
             tp3 = entry_price - current_atr * atr_mult * tp3_r
 
         r_distance = abs(entry_price - stop_loss)
+        r_distance_pct = (r_distance / entry_price * 100.0) if entry_price > 0 else 0.0
+        max_stop_distance_pct = float(self._risk.get("max_stop_distance_pct", 50.0) or 50.0)
+        setup_sector = str((setup_passport or {}).get("sector") or sector_for_asset(asset_from_symbol(symbol)))
+        is_binance_alpha = setup_sector == "binance_alpha"
+        geometry_values = (entry_price, current_atr, stop_loss, tp1, tp2, tp3, r_distance, r_distance_pct)
+        invalid_geometry = (
+            not all(math.isfinite(float(v)) for v in geometry_values)
+            or entry_price <= 0
+            or current_atr <= 0
+            or stop_loss <= 0
+            or tp1 <= 0
+            or tp2 <= 0
+            or tp3 <= 0
+            or r_distance <= 0
+        )
+        if is_binance_alpha and invalid_geometry:
+            self._reject_setup(
+                f"invalid binance_alpha price geometry: entry={entry_price:.8f} atr={current_atr:.8f} "
+                f"sl={stop_loss:.8f} tp1={tp1:.8f} tp2={tp2:.8f} tp3={tp3:.8f}"
+            )
+            log.info(
+                "%s skipped — invalid binance_alpha setup geometry entry=%.8f atr=%.8f sl=%.8f tp1=%.8f tp2=%.8f tp3=%.8f",
+                symbol, entry_price, current_atr, stop_loss, tp1, tp2, tp3,
+            )
+            return None
+        if is_binance_alpha and r_distance_pct > max_stop_distance_pct:
+            self._reject_setup(
+                f"binance_alpha stop distance {r_distance_pct:.1f}% exceeds max {max_stop_distance_pct:.1f}%"
+            )
+            log.info(
+                "%s skipped — binance_alpha stop distance %.1f%% exceeds max %.1f%%",
+                symbol, r_distance_pct, max_stop_distance_pct,
+            )
+            return None
 
         # Reward/risk check against TP2
         reward = abs(tp2 - entry_price)
@@ -400,6 +445,7 @@ class RiskManager:
             max_hold_duration_s=int(exit_profile.get("max_hold_duration_s", self._exit.get("max_hold_duration_s", 172800))),
             short_setup_label=str(short_setup_label or ""),
             short_setup_confidence=float(short_setup_confidence or 0.0),
+            setup_passport=dict(setup_passport or {}),
         )
 
     def _resolve_exit_profile(self, strategy_sleeve: str) -> tuple[str, dict]:
@@ -427,15 +473,17 @@ class RiskManager:
         elif time.time() - self.state.week_start_ts > 86400 * 7:
             self.state.reset_week(equity)
 
-    def on_trade_opened(self, symbol: str = "", direction: str = "", risk_pct: float = 0.0) -> None:
+    def on_trade_opened(self, symbol: str = "", direction: str = "", risk_pct: float = 0.0, sector: str = "") -> None:
         self.state.open_trade_count += 1
         self.state.open_risk_pct += risk_pct
         if symbol:
             self.state.symbol_risk_pct[symbol] = self.state.symbol_risk_pct.get(symbol, 0.0) + risk_pct
         if direction:
             self.state.direction_risk_pct[direction] = self.state.direction_risk_pct.get(direction, 0.0) + risk_pct
+        if sector:
+            self.state.sector_risk_pct[sector] = self.state.sector_risk_pct.get(sector, 0.0) + risk_pct
 
-    def on_trade_closed(self, pnl: float, symbol: str = "", direction: str = "", risk_pct: float = 0.0) -> None:
+    def on_trade_closed(self, pnl: float, symbol: str = "", direction: str = "", risk_pct: float = 0.0, sector: str = "") -> None:
         self.state.open_trade_count = max(0, self.state.open_trade_count - 1)
         self.state.open_risk_pct = max(0.0, self.state.open_risk_pct - risk_pct)
         if symbol and symbol in self.state.symbol_risk_pct:
@@ -446,6 +494,10 @@ class RiskManager:
             self.state.direction_risk_pct[direction] = max(0.0, self.state.direction_risk_pct[direction] - risk_pct)
             if self.state.direction_risk_pct[direction] == 0.0:
                 self.state.direction_risk_pct.pop(direction, None)
+        if sector and sector in self.state.sector_risk_pct:
+            self.state.sector_risk_pct[sector] = max(0.0, self.state.sector_risk_pct[sector] - risk_pct)
+            if self.state.sector_risk_pct[sector] == 0.0:
+                self.state.sector_risk_pct.pop(sector, None)
         if pnl < 0:
             self.state.consecutive_losses += 1
             cooldown_after = int(self._risk.get("cooldown_after_loss_streak", 0) or 0)

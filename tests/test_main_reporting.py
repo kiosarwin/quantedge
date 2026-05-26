@@ -132,12 +132,14 @@ def test_maybe_send_equity_graph_report_runs_on_interval():
     assert sent["points"] == bot._equity_graph_points
 
 
-def test_price_map_includes_open_trades_missing_from_scan(monkeypatch):
+def test_price_map_overrides_open_trades_with_live_ticker(monkeypatch):
     bot = NinjaTrader.__new__(NinjaTrader)
+    fetched = []
 
     class _Client:
         async def fetch_ticker(self, symbol):
-            return {"last": 42.5 if symbol == "MISSING/USDT:USDT" else 0.0}
+            fetched.append(symbol)
+            return {"last": 42.5 if symbol == "MISSING/USDT:USDT" else 11.25}
 
     bot._client = _Client()
     bot._trade_mgr = SimpleNamespace(open_symbols=["MISSING/USDT:USDT", "SEEN/USDT:USDT"])
@@ -147,7 +149,8 @@ def test_price_map_includes_open_trades_missing_from_scan(monkeypatch):
 
     price_map = asyncio.run(bot._price_map_with_open_trades(snapshots))
 
-    assert price_map["SEEN/USDT:USDT"] == 10.0
+    assert fetched == ["MISSING/USDT:USDT", "SEEN/USDT:USDT"]
+    assert price_map["SEEN/USDT:USDT"] == 11.25
     assert price_map["MISSING/USDT:USDT"] == 42.5
 
 
@@ -279,3 +282,42 @@ def test_effective_account_metrics_include_floating_pnl():
     assert equity == 81.5
     assert round(daily_pnl_pct, 2) == round((81.5 - 79.0) / 79.0 * 100, 2)
     assert round(drawdown_pct, 2) == round((82.0 - 81.5) / 82.0 * 100, 2)
+
+
+def test_maybe_send_crypto_news_report_runs_on_independent_interval(monkeypatch):
+    import asyncio
+    import time
+    from types import SimpleNamespace
+
+    import src.main as main_module
+    from src.main import NinjaTrader
+
+    sent = {}
+
+    async def fake_fetch(cfg, *, limit, timeout_s):
+        sent["fetch"] = (limit, timeout_s)
+        return [SimpleNamespace(title="Breaking BTC news", url="https://example.com", source="example.com", urgent_score=10.0)]
+
+    async def fake_narratives(cfg, items, *, limit):
+        sent["narratives"] = (items, limit)
+        return [SimpleNamespace(title="BTC flow", bias="bullish", explanation="ETF flow leads.", evidence=("Breaking BTC news",), source="rule", urgency_score=10.0, confidence=0.7)]
+
+    class _Telegram:
+        async def crypto_news_report(self, items, *, interval_minutes):
+            sent["report"] = (items, interval_minutes)
+
+    monkeypatch.setattr(main_module, "fetch_crypto_news_highlights", fake_fetch)
+    monkeypatch.setattr(main_module, "build_market_hot_narratives", fake_narratives)
+
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._cfg = {"telegram": {"crypto_news_interval_minutes": 60, "crypto_news_limit": 5, "crypto_news_timeout_seconds": 3.0}}
+    bot._tg_crypto_news_ts = time.time() - 3601
+    bot._telegram = _Telegram()
+
+    asyncio.run(bot._maybe_send_crypto_news_report())
+
+    assert sent["fetch"] == (5, 3.0)
+    assert sent["narratives"][1] == 5
+    assert sent["report"][0][0].title == "BTC flow"
+    assert sent["report"][1] == 60
+    assert bot._tg_crypto_news_ts > 0

@@ -88,3 +88,38 @@ def test_cycle_summary_disabled_logger_stays_empty(tmp_path):
     rl = RejectionLogger(cfg)
     rl.log(stage="score_threshold", reason="ignored")
     assert rl.cycle_summary() == {"total": 0, "stages": []}
+
+
+def test_rejection_record_uses_router_setup_type_and_sleeve(tmp_path):
+    from types import SimpleNamespace
+
+    rl = RejectionLogger({
+        "rejection_logger": {
+            "enabled": True,
+            "path": str(tmp_path / "rejections.parquet"),
+            "flush_every": 1,
+        }
+    })
+    phase = SimpleNamespace(value="liquidity_sweep")
+    breakdown = SimpleNamespace(
+        symbol="ZEC/USDT:USDT",
+        direction="short",
+        total_score=37.2,
+        regime=SimpleNamespace(value="trending_expansion"),
+        smart_money=SimpleNamespace(phase=phase, score=80.0),
+        ev_result=None,
+        regime_ok=True,
+        smart_money_ok=True,
+        ev_ok=True,
+        setup_type="liquidity_sweep_reversal",
+        strategy_sleeve="reversal",
+        setup_quality_score=82.5,
+    )
+
+    rl.log(stage="paper_scope", reason="test", breakdown=breakdown, threshold_required=35.0)
+
+    import pandas as pd
+    row = pd.read_parquet(tmp_path / "rejections.parquet").iloc[-1]
+    assert row["setup_type"] == "liquidity_sweep_reversal"
+    assert row["strategy_sleeve"] == "reversal"
+    assert row["setup_quality_score"] == 82.5

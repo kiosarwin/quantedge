@@ -109,8 +109,10 @@ class TradeManager:
         if not can:
             log.warning("Risk guard blocked trade on %s: %s", setup.symbol, reason)
             return None
+
+        sector = str((setup.setup_passport or {}).get("sector", "unknown"))
         can, reason = self._risk.check_trade_exposure(
-            setup.symbol, setup.direction, setup.risk_pct
+            setup.symbol, setup.direction, setup.risk_pct, sector=sector
         )
         if not can:
             log.warning("Exposure guard blocked trade on %s: %s", setup.symbol, reason)
@@ -161,7 +163,10 @@ class TradeManager:
         )
         self._trades[setup.symbol] = trade
         self._risk.on_trade_opened(
-            symbol=setup.symbol, direction=setup.direction, risk_pct=setup.risk_pct
+            symbol=setup.symbol,
+            direction=setup.direction,
+            risk_pct=setup.risk_pct,
+            sector=str((setup.setup_passport or {}).get("sector", "unknown")),
         )
         self._save_state()
         log.info("Trade opened on %s @ %.4f", setup.symbol, fill_price)
@@ -182,6 +187,17 @@ class TradeManager:
     @property
     def open_symbols(self) -> list[str]:
         return list(self._trades.keys())
+
+    @property
+    def open_trades(self) -> list[OpenTrade]:
+        return list(self._trades.values())
+
+    async def close_for_rotation(self, symbol: str, price: float, reason: str = "rotation_upgrade") -> bool:
+        trade = self._trades.get(symbol)
+        if trade is None:
+            return False
+        await self._close_trade(trade, price, reason)
+        return True
 
     def get_floating_pnl(self, price_map: dict[str, float]) -> list[dict]:
         result = []
@@ -210,12 +226,72 @@ class TradeManager:
                 "tp1": trade.setup.tp1,
                 "risk_pct": trade.setup.risk_pct,
                 "risk_usd": round(risk_usd, 2),
+                "setup_passport": trade.setup.setup_passport,
+                "expected_path": (trade.setup.setup_passport or {}).get("expected_path", ""),
+                "invalidation": (trade.setup.setup_passport or {}).get("invalidation", ""),
             })
         return result
 
     # ------------------------------------------------------------------ #
     #  Exit logic                                                          #
     # ------------------------------------------------------------------ #
+
+    def _passport_failure_reason(self, trade: OpenTrade, now: float) -> str:
+        """Return an exit reason when the entry passport thesis has failed.
+
+        This is intentionally price/R based.  The full market snapshot is not
+        available in TradeManager, so the manager enforces the contract that
+        was written at entry: continuation should not bleed deeply without
+        impulse, breakouts should not re-enter, and sweep reversals should
+        snap back before spending most of 1R.
+        """
+        cfg = self._cfg.get("exit", {}).get("passport_monitor", {}) or {}
+        if not cfg.get("enabled", True):
+            return ""
+        if trade.tp1_hit:
+            return ""
+        passport = trade.setup.setup_passport or {}
+        if not isinstance(passport, dict) or not passport:
+            return ""
+
+        decision = str(passport.get("decision", "") or "")
+        if decision and decision != "eligible":
+            return "passport_no_trade"
+
+        age = now - trade.opened_at
+        min_age_s = float(cfg.get("min_age_s", 600.0) or 0.0)
+        if age < min_age_s:
+            return ""
+
+        setup_type = str(passport.get("setup_type", "") or "")
+        expected_path = str(passport.get("expected_path", "") or "")
+
+        def _hit(mae_key: str, mae_default: float, mfe_key: str, mfe_default: float) -> bool:
+            mae_threshold = float(cfg.get(mae_key, mae_default) or mae_default)
+            mfe_ceiling = float(cfg.get(mfe_key, mfe_default) or mfe_default)
+            return trade.mae_r >= mae_threshold and trade.mfe_r <= mfe_ceiling
+
+        if setup_type == "compression_breakout" or expected_path == "range_expansion":
+            if _hit("breakout_failure_mae_r", 0.45, "breakout_mfe_ceiling_r", 0.25):
+                return "passport_failed_breakout"
+        elif setup_type in {"sweep_reversal", "liquidity_sweep_reversal", "phase_d", "liq_sweep"} or expected_path == "snapback_then_follow_through":
+            if _hit("reversal_failure_mae_r", 0.50, "reversal_mfe_ceiling_r", 0.20):
+                return "passport_failed_reversal"
+        elif (
+            setup_type in {"mtf_price_action_continuation", "vwap_pullback_continuation"}
+            or expected_path in {"mtf_impulse_continuation", "vwap_reclaim_continuation"}
+        ):
+            if _hit(
+                "experimental_continuation_failure_mae_r",
+                0.50,
+                "experimental_continuation_mfe_ceiling_r",
+                0.35,
+            ):
+                return "passport_failed_experimental_continuation"
+        elif setup_type == "trend_continuation" or expected_path == "impulse_continuation":
+            if _hit("trend_failure_mae_r", 0.70, "trend_mfe_ceiling_r", 0.20):
+                return "passport_failed_continuation"
+        return ""
 
     async def _check_exits(self, trade: OpenTrade, price: float) -> None:
         if price <= 0:
@@ -255,6 +331,11 @@ class TradeManager:
         # Stop loss
         if trade.is_sl_hit(price):
             await self._close_trade(trade, price, "stop_loss")
+            return
+
+        passport_reason = self._passport_failure_reason(trade, now)
+        if passport_reason:
+            await self._close_trade(trade, price, passport_reason)
             return
 
         # ── Adverse-move early-cut ────────────────────────────────────
@@ -429,6 +510,7 @@ class TradeManager:
             symbol=trade.setup.symbol,
             direction=trade.setup.direction,
             risk_pct=trade.setup.risk_pct,
+            sector=str((trade.setup.setup_passport or {}).get("sector", "unknown")),
         )
 
         if self._on_close:
@@ -518,6 +600,7 @@ class TradeManager:
                 "max_hold_duration_s": 172800,
                 "short_setup_label": "",
                 "short_setup_confidence": 0.0,
+                "setup_passport": {},
             }
             for key, value in defaults.items():
                 if key not in setup_payload:

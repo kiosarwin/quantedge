@@ -97,3 +97,88 @@ def test_edge_detector_evaluates_with_memory_seeded_by_outcomes():
     # gate must scale size down rather than block hard.
     assert result.action == "SCALE_DOWN"
     assert 0.0 < result.size_mult <= 1.0
+
+
+def _trade(pnl_pct, direction="long", regime="trending_expansion", sm_phase="trending"):
+    class T:
+        pass
+
+    t = T()
+    t.pnl_pct = pnl_pct
+    t.direction = direction
+    t.regime = regime
+    t.scores = {"sm_phase": sm_phase}
+    return t
+
+
+def test_ev_model_conservative_gate_requires_lower_bound_edge():
+    cfg = {
+        "ev_model": {
+            "statistical_gate_enabled": True,
+            "min_trades_for_ev": 20,
+            "min_p_win": 0.40,
+            "min_ev_pct": 0.03,
+            "prior_weight_alpha": 8,
+            "loss_shrink_factor": 0.5,
+            "confidence_z": 1.0,
+            "payoff_haircut": 0.85,
+            "loss_inflation": 1.10,
+            "cost_buffer_pct": 0.05,
+            "min_conservative_ev_pct": 0.0,
+        },
+        "risk": {"taker_fee_pct": 0.04, "slippage_pct": 0.05},
+    }
+    ev = EVModel(cfg)
+    # Point-estimate looks positive: 12 wins x +1.2%, 8 losses x -0.6%.
+    # Conservative lower-bound math should still reject it after haircut/loss/cost buffers.
+    trades = [_trade(1.2) for _ in range(12)] + [_trade(-0.6) for _ in range(8)]
+
+    res = ev.compute(
+        trades,
+        funding_rate=0.0,
+        pwin_ctx=PwinContext(
+            direction="long",
+            regime="trending_expansion",
+            sm_phase="trending",
+        ),
+    )
+
+    assert res.ev_net_pct > 0
+    assert res.conservative_ev_net_pct < 0
+    assert res.statistical_edge_ok is False
+    assert res.is_tradeable is False
+
+
+def test_ev_model_conservative_gate_passes_strong_sample_edge():
+    cfg = {
+        "ev_model": {
+            "statistical_gate_enabled": True,
+            "min_trades_for_ev": 20,
+            "min_p_win": 0.40,
+            "min_ev_pct": 0.03,
+            "prior_weight_alpha": 8,
+            "loss_shrink_factor": 0.5,
+            "confidence_z": 1.0,
+            "payoff_haircut": 0.85,
+            "loss_inflation": 1.10,
+            "cost_buffer_pct": 0.05,
+            "min_conservative_ev_pct": 0.0,
+        },
+        "risk": {"taker_fee_pct": 0.04, "slippage_pct": 0.05},
+    }
+    ev = EVModel(cfg)
+    trades = [_trade(1.6) for _ in range(16)] + [_trade(-0.5) for _ in range(4)]
+
+    res = ev.compute(
+        trades,
+        funding_rate=0.0,
+        pwin_ctx=PwinContext(
+            direction="long",
+            regime="trending_expansion",
+            sm_phase="trending",
+        ),
+    )
+
+    assert res.conservative_ev_net_pct > 0
+    assert res.statistical_edge_ok is True
+    assert res.is_tradeable is True

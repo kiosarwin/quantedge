@@ -13,10 +13,12 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import pathlib
 import shutil
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -26,7 +28,7 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from src.data.client import BinanceFuturesClient
-from src.data.market_data import MarketDataService
+from src.data.market_data import MarketDataService, MarketSnapshot
 from src.scanner.scanner import PairScanner
 from src.scoring.scorer import Scorer, SignalBreakdown
 from src.risk.risk_manager import RiskManager
@@ -39,18 +41,112 @@ from src.models.ml_engine import MLPredictor, LiveReadiness
 from src.models.fund_manager import FundManager
 from src.models.cohort_policy import CohortPolicy
 from src.models.strategy_lifecycle import StrategyLifecycleManager
+from src.models.sector_rotation import attach_sector_rotation, compute_sector_rotation
+from src.models.strategy_passport import asset_from_symbol, sector_for_asset
 from src.models.adaptive_brain import AdaptiveBrain
 from src.risk.correlation_filter import CorrelationFilter
 from src.risk.session_modulator import SessionModulator
 from src.data.dataset_logger import DatasetLogger
+from src.data.crypto_news import build_market_hot_narratives, fetch_crypto_news_highlights
 from src.analysis.rejection_logger import RejectionLogger
 from src.reporting.attribution import build_attribution_report
 from src.reporting.bootstrap import build_bootstrap_audit_report, format_bootstrap_audit_lines
+from src.reporting.trading_brain import TradingBrainJournal
 from src.session_clock import active_market_session_key
 from src.config import validate_config, ConfigValidationError
 
 console = Console()
 log = logging.getLogger("ninja_trader")
+
+
+def setup_passport_with_market_context(breakdown) -> dict:
+    """Attach entry broad-market context to the persisted setup passport."""
+    passport_obj = getattr(breakdown, "setup_passport", None)
+    passport = dict(passport_obj.as_dict() if passport_obj is not None else {})
+    market_ctx = getattr(breakdown, "market_context", None)
+    sector_rotation = getattr(breakdown, "sector_rotation", None)
+    if sector_rotation is not None:
+        rotation_context = {
+            "sector": str(getattr(sector_rotation, "sector", "unknown") or "unknown"),
+            "state": str(getattr(sector_rotation, "state", "unknown") or "unknown"),
+            "rank": int(getattr(sector_rotation, "rank", 0) or 0),
+            "relative_btc_pct": float(getattr(sector_rotation, "relative_btc_pct", 0.0) or 0.0),
+            "breadth": float(getattr(sector_rotation, "breadth", 0.0) or 0.0),
+            "confidence": float(getattr(sector_rotation, "confidence", 0.0) or 0.0),
+        }
+        passport.setdefault("sector_rotation", dict(rotation_context))
+        passport.setdefault("sector_rotation_state", rotation_context["state"])
+        passport.setdefault("sector_rotation_rank", rotation_context["rank"])
+        passport.setdefault("sector_rotation_relative_btc_pct", rotation_context["relative_btc_pct"])
+        passport.setdefault("sector_rotation_confidence", rotation_context["confidence"])
+    if market_ctx is None:
+        return passport
+
+    context = {
+        "risk_on_state": str(getattr(market_ctx, "risk_on_state", "unknown") or "unknown"),
+        "rotation_state": str(getattr(market_ctx, "rotation_state", "unknown") or "unknown"),
+        "btc_trend": str(getattr(market_ctx, "btc_trend", "unknown") or "unknown"),
+        "eth_btc_trend": str(getattr(market_ctx, "eth_btc_trend", "unknown") or "unknown"),
+        "btc_d_trend": str(getattr(market_ctx, "btc_d_trend", "unknown") or "unknown"),
+        "total_trend": str(getattr(market_ctx, "total_trend", "unknown") or "unknown"),
+        "confidence": float(getattr(market_ctx, "confidence", 0.0) or 0.0),
+    }
+    passport.setdefault("market_context", dict(context))
+    passport.setdefault("market_risk_on_state", context["risk_on_state"])
+    passport.setdefault("market_rotation_state", context["rotation_state"])
+    passport.setdefault("market_btc_trend", context["btc_trend"])
+    passport.setdefault("market_eth_btc_trend", context["eth_btc_trend"])
+    passport.setdefault("market_btc_d_trend", context["btc_d_trend"])
+    passport.setdefault("market_total_trend", context["total_trend"])
+    passport.setdefault("market_context_confidence", context["confidence"])
+    return passport
+
+
+def enrich_closed_trade_scores(scores: dict | None, trade, cfg: dict) -> dict:
+    """Backfill closed-trade metadata when a restored open trade lacks pending scores."""
+    enriched = dict(scores or {})
+    setup = getattr(trade, "setup", None)
+    passport = getattr(setup, "setup_passport", {}) or {}
+    opened_at = float(getattr(trade, "opened_at", 0.0) or time.time())
+    opened_dt = datetime.fromtimestamp(opened_at, tz=timezone.utc)
+    opened_tm = time.gmtime(opened_at)
+    symbol = str(getattr(trade, "symbol", "") or getattr(setup, "symbol", ""))
+    asset = str(passport.get("asset") or asset_from_symbol(symbol))
+    sector = str(passport.get("sector") or sector_for_asset(asset))
+    regime = str(passport.get("regime") or "unknown")
+    sm_phase = str(passport.get("sm_phase") or "neutral")
+    regime_code = {
+        "trending_expansion": 3.0,
+        "accumulation_compression": 2.0,
+        "distribution": 1.0,
+        "chaos": 0.0,
+    }.get(regime, enriched.get("regime_code", -1.0))
+
+    enriched.setdefault("timeframe", cfg.get("timeframes", {}).get("primary", "unknown"))
+    enriched.setdefault("session", active_market_session_key(opened_dt))
+    enriched.setdefault("hour_utc", float(opened_tm.tm_hour))
+    enriched.setdefault("hour_of_day", int(opened_tm.tm_hour))
+    enriched.setdefault("day_of_week", int(opened_tm.tm_wday))
+    enriched.setdefault("asset", asset)
+    enriched.setdefault("sector", sector)
+    passport_market_ctx = passport.get("market_context") if isinstance(passport.get("market_context"), dict) else {}
+    enriched.setdefault("market_risk_on_state", passport.get("market_risk_on_state") or passport_market_ctx.get("risk_on_state", "unknown"))
+    enriched.setdefault("market_rotation_state", passport.get("market_rotation_state") or passport_market_ctx.get("rotation_state", "unknown"))
+    enriched.setdefault("market_btc_trend", passport.get("market_btc_trend") or passport_market_ctx.get("btc_trend", "unknown"))
+    enriched.setdefault("market_eth_btc_trend", passport.get("market_eth_btc_trend") or passport_market_ctx.get("eth_btc_trend", "unknown"))
+    enriched.setdefault("market_btc_d_trend", passport.get("market_btc_d_trend") or passport_market_ctx.get("btc_d_trend", "unknown"))
+    enriched.setdefault("market_total_trend", passport.get("market_total_trend") or passport_market_ctx.get("total_trend", "unknown"))
+    enriched.setdefault("market_context_confidence", float(passport.get("market_context_confidence") or passport_market_ctx.get("confidence", 0.0) or 0.0))
+    enriched.setdefault("setup_passport", dict(passport))
+    enriched.setdefault("strategy_sleeve", str(getattr(setup, "strategy_sleeve", "") or passport.get("sleeve", "")))
+    enriched.setdefault("exit_profile", str(getattr(setup, "exit_profile", "") or ""))
+    enriched.setdefault("setup_type", str(passport.get("setup_type", "unknown")))
+    enriched.setdefault("setup_quality_score", float(passport.get("quality_score", 0.0) or 0.0))
+    enriched.setdefault("signal_type", f"{regime}|{sm_phase}")
+    enriched.setdefault("entry_reason", str(passport.get("reason", "unknown") or "unknown"))
+    enriched.setdefault("regime_code", float(regime_code))
+    enriched.setdefault("sm_phase", sm_phase)
+    return enriched
 
 
 def cleanup_workspace_artifacts(root: Path | None = None) -> dict[str, int]:
@@ -109,8 +205,8 @@ def normalize_config(cfg: dict) -> dict:
         if cfg["exchange"].get("testnet", False):
             raise RuntimeError("LIVE mode cannot have testnet: true — set testnet: false in config")
     elif mode == "paper":
-        # Paper mode always forces testnet=True to avoid any accidental real orders
-        cfg["exchange"]["testnet"] = True
+        # Paper mode never places real orders; use the configured public market-data endpoint.
+        # Binance futures testnet tickers can go stale, which freezes floating PnL/equity.
         if paper_validation.get("enabled", True):
             max_open_override = paper_validation.get("max_open_trades_override")
             if max_open_override is not None:
@@ -195,6 +291,7 @@ class NinjaTrader:
         self._startup_cycle_report_pending = True
         self._last_fm_report_ts = 0.0       # for fund manager report interval
         self._last_bootstrap_audit_ts = time.time()  # separate bootstrap audit cadence
+        self._tg_crypto_news_ts = 0.0      # independent crypto news cadence
         self._live_transition_done = False  # guard against double-transition
         self._last_monthly_reset_ts = time.time()
         self._last_reconcile_ts = 0.0
@@ -207,6 +304,10 @@ class NinjaTrader:
             "day_start_ts": float(getattr(risk_state, "day_start_ts", time.time()) or time.time()),
             "candidate_count": 0,
             "veto_count": 0,
+        }
+        self._rotation_state = {
+            "day_start_ts": float(getattr(risk_state, "day_start_ts", time.time()) or time.time()),
+            "count": 0,
         }
 
         # Feed learner's trade log into the scorer's EV model each tick
@@ -240,8 +341,174 @@ class NinjaTrader:
         self._dataset_logger = DatasetLogger(cfg, source=_src)
         self._dataset_record_ids: dict[str, str] = {}   # symbol → record_id
 
+        # Trading brain journal -- read-only local diagnostics, no decision impact
+        self._trading_brain = TradingBrainJournal(cfg)
+
         # Rejection forensics — diagnostics sink, zero behavioral impact
         self._rej = RejectionLogger(cfg)
+
+
+    def _rotation_config(self) -> dict:
+        return self._cfg.get("position_rotation", {}) or {}
+
+    def _sync_rotation_budget(self) -> None:
+        risk_state = getattr(self._risk, "state", None)
+        current_day_start = float(getattr(risk_state, "day_start_ts", 0.0) or 0.0)
+        if self._rotation_state.get("day_start_ts") != current_day_start:
+            self._rotation_state = {"day_start_ts": current_day_start, "count": 0}
+
+    def _rotation_budget_allows(self, rotations_this_cycle: int) -> tuple[bool, str]:
+        cfg = self._rotation_config()
+        if not bool(cfg.get("enabled", False)):
+            return False, "position rotation disabled"
+        max_cycle = int(cfg.get("max_rotations_per_cycle", 1) or 0)
+        if max_cycle <= 0 or rotations_this_cycle >= max_cycle:
+            return False, "rotation cycle budget exhausted"
+        self._sync_rotation_budget()
+        max_day = int(cfg.get("max_rotations_per_day", 3) or 0)
+        if max_day <= 0 or int(self._rotation_state.get("count", 0)) >= max_day:
+            return False, "rotation daily budget exhausted"
+        return True, "rotation budget ok"
+
+    @staticmethod
+    def _trade_unrealized_r(trade: OpenTrade, price: float) -> float:
+        r = float(getattr(trade.setup, "r_distance", 0.0) or 0.0)
+        if r <= 0.0 or price <= 0.0:
+            return 0.0
+        if trade.direction == "long":
+            return (price - trade.setup.entry_price) / r
+        return (trade.setup.entry_price - price) / r
+
+    @staticmethod
+    def _trade_unrealized_pct(trade: OpenTrade, price: float) -> float:
+        entry = float(getattr(trade.setup, "entry_price", 0.0) or 0.0)
+        if entry <= 0.0 or price <= 0.0:
+            return 0.0
+        if trade.direction == "long":
+            return (price - entry) / entry * 100.0
+        return (entry - price) / entry * 100.0
+
+    def _candidate_rotation_score(self, breakdown: SignalBreakdown) -> float:
+        ev = getattr(breakdown, "ev_result", None)
+        ev_bonus = max(-6.0, min(6.0, float(getattr(ev, "ev_net_pct", 0.0) or 0.0) * 4.0))
+        quality_bonus = max(0.0, (float(getattr(breakdown, "setup_quality_score", 0.0) or 0.0) - 50.0) * 0.15)
+        return self._positive_ev_probe_score_basis(breakdown) + ev_bonus + quality_bonus
+
+    def _open_trade_rotation_strength(self, trade: OpenTrade, price: float) -> float:
+        unrealized_r = self._trade_unrealized_r(trade, price)
+        has_passport = bool(getattr(trade.setup, "setup_passport", None))
+        passport_bonus = 4.0 if has_passport else -4.0
+        ev_net = float(getattr(trade.setup, "ev_net_pct", 0.0) or 0.0)
+        ev_score = max(-8.0, min(8.0, ev_net * 8.0))
+        tp_bonus = 10.0 if trade.tp1_hit else 0.0
+        mfe_bonus = min(12.0, max(0.0, float(getattr(trade, "mfe_r", 0.0) or 0.0)) * 8.0)
+        pnl_score = max(-18.0, min(18.0, unrealized_r * 14.0))
+        return 50.0 + pnl_score + passport_bonus + ev_score + tp_bonus + mfe_bonus
+
+    def _rotation_positive_ev_probe_mode(self, breakdown: SignalBreakdown) -> str | None:
+        try:
+            threshold = self._threshold_for(getattr(breakdown, "regime", None))
+            return self._paper_positive_ev_probe_mode(breakdown, threshold)
+        except Exception:
+            return None
+
+    def _select_rotation_victim(
+        self,
+        breakdown: SignalBreakdown,
+        snapshots: dict[str, MarketSnapshot],
+        rotations_this_cycle: int,
+    ) -> tuple[OpenTrade | None, float, str]:
+        allowed, budget_reason = self._rotation_budget_allows(rotations_this_cycle)
+        if not allowed:
+            return None, 0.0, budget_reason
+
+        cfg = self._rotation_config()
+        candidate_score = self._candidate_rotation_score(breakdown)
+        positive_ev_probe = self._rotation_positive_ev_probe_mode(breakdown)
+        min_score = float(cfg.get("min_candidate_score", 72.0) or 72.0)
+        if positive_ev_probe:
+            min_score = float(
+                cfg.get("positive_ev_probe_min_candidate_score", min_score) or min_score
+            )
+        if candidate_score < min_score:
+            return None, 0.0, f"candidate_score={candidate_score:.1f} < {min_score:.1f}"
+
+        quality = float(getattr(breakdown, "setup_quality_score", 0.0) or 0.0)
+        min_quality = float(cfg.get("min_candidate_quality", 58.0) or 58.0)
+        if positive_ev_probe:
+            min_quality = float(
+                cfg.get("positive_ev_probe_min_candidate_quality", min_quality) or 0.0
+            )
+        if quality < min_quality:
+            return None, 0.0, f"setup_quality={quality:.1f} < {min_quality:.1f}"
+
+        ev = getattr(breakdown, "ev_result", None)
+        p_win = float(getattr(ev, "p_win", 0.0) or 0.0)
+        min_p_win = float(cfg.get("min_candidate_p_win", 0.38) or 0.38)
+        if p_win < min_p_win:
+            return None, 0.0, f"p_win={p_win:.3f} < {min_p_win:.3f}"
+        ev_net = float(getattr(ev, "ev_net_pct", 0.0) or 0.0)
+        min_ev = float(cfg.get("min_candidate_ev_net_pct", -0.75) or -0.75)
+        if ev_net < min_ev:
+            return None, 0.0, f"ev_net={ev_net:+.3f}% < {min_ev:+.3f}%"
+
+        now = time.time()
+        min_age_s = float(cfg.get("min_victim_age_s", 900.0) or 900.0)
+        protect_after_tp1 = bool(cfg.get("protect_after_tp1", True))
+        protect_mfe_r = float(cfg.get("protect_mfe_r", 0.80) or 0.80)
+        protect_gain_r = float(cfg.get("protect_unrealized_gain_r", 0.30) or 0.30)
+        protect_gain_pct = float(cfg.get("protect_unrealized_gain_pct", 3.0) or 3.0)
+        protect_winner_min_age_s = float(cfg.get("protect_winner_min_age_s", 21600.0) or 21600.0)
+        max_adverse_r = float(cfg.get("max_victim_adverse_r", 0.90) or 0.90)
+        best: tuple[float, OpenTrade, float, float] | None = None
+        for trade in self._trade_mgr.open_trades:
+            snap = snapshots.get(trade.symbol)
+            price = float(getattr(snap, "last_price", 0.0) or 0.0) if snap is not None else 0.0
+            if price <= 0.0:
+                continue
+            age = now - float(getattr(trade, "opened_at", now) or now)
+            if age < min_age_s:
+                continue
+            if protect_after_tp1 and trade.tp1_hit:
+                continue
+            unrealized_r = self._trade_unrealized_r(trade, price)
+            unrealized_pct = self._trade_unrealized_pct(trade, price)
+            if unrealized_r >= protect_gain_r:
+                continue
+            if unrealized_pct >= protect_gain_pct:
+                continue
+            if age < protect_winner_min_age_s and unrealized_pct > 0.0:
+                continue
+            if float(getattr(trade, "mfe_r", 0.0) or 0.0) >= protect_mfe_r:
+                continue
+            if unrealized_r <= -max_adverse_r:
+                continue
+            strength = self._open_trade_rotation_strength(trade, price)
+            if best is None or strength < best[0]:
+                best = (strength, trade, price, unrealized_r)
+
+        if best is None:
+            return None, 0.0, "no eligible weak open trade"
+        victim_strength, victim, victim_price, victim_r = best
+        min_advantage = float(cfg.get("min_score_advantage", 14.0) or 14.0)
+        if positive_ev_probe:
+            min_advantage = float(
+                cfg.get("positive_ev_probe_min_score_advantage", min_advantage) or 0.0
+            )
+        advantage = candidate_score - victim_strength
+        if advantage < min_advantage:
+            return None, 0.0, (
+                f"candidate advantage {advantage:.1f} < {min_advantage:.1f} "
+                f"over {victim.symbol}"
+            )
+        return victim, victim_price, (
+            f"candidate_score={candidate_score:.1f} victim={victim.symbol} "
+            f"victim_strength={victim_strength:.1f} victim_r={victim_r:+.2f} advantage={advantage:.1f}"
+        )
+
+    def _record_position_rotation(self) -> None:
+        self._sync_rotation_budget()
+        self._rotation_state["count"] = int(self._rotation_state.get("count", 0)) + 1
 
     def _paper_validation_enabled(self) -> bool:
         return self._trading["mode"] == "paper" and bool(
@@ -344,6 +611,175 @@ class NinjaTrader:
     def _record_ml_veto(self) -> None:
         self._sync_ml_gate_budget()
         self._ml_gate_state["veto_count"] = int(self._ml_gate_state["veto_count"]) + 1
+
+    def _ev_gate_enabled(self) -> bool:
+        return bool(self._cfg.get("ev_model", {}).get("gate_enabled", True))
+
+
+    def _paper_experimental_setup_stress_check(self, breakdown: SignalBreakdown) -> tuple[bool, str]:
+        if not self._paper_validation_enabled():
+            return True, "paper validation disabled"
+        if not bool(self._paper_validation.get("experimental_setup_stress_block_enabled", True)):
+            return True, "experimental setup stress block disabled"
+
+        setup_type = str(getattr(breakdown, "setup_type", "") or "")
+        blocked_setups = set(
+            self._paper_validation.get(
+                "experimental_setup_stress_block_setup_types",
+                ["mtf_price_action_continuation", "vwap_pullback_continuation", "liquidity_sweep_reversal"],
+            )
+            or []
+        )
+        if setup_type not in blocked_setups:
+            return True, "not an experimental stress-block setup"
+
+        risk_state = getattr(self._risk, "state", None)
+        daily_pnl = float(getattr(risk_state, "daily_pnl_pct", 0.0) or 0.0)
+        consecutive_losses = int(getattr(risk_state, "consecutive_losses", 0) or 0)
+        daily_trigger = float(
+            self._paper_validation.get(
+                "experimental_setup_stress_block_daily_loss_pct",
+                self._paper_validation.get("stress_tighten_daily_loss_pct", -3.0),
+            )
+            or -3.0
+        )
+        streak_trigger = int(
+            self._paper_validation.get(
+                "experimental_setup_stress_block_consecutive_losses",
+                self._paper_validation.get("stress_tighten_consecutive_losses", 3),
+            )
+            or 3
+        )
+        daily_active = daily_trigger < 0.0 and daily_pnl <= daily_trigger
+        streak_active = streak_trigger > 0 and consecutive_losses >= streak_trigger
+        if daily_active or streak_active:
+            return (
+                False,
+                f"experimental setup stress block: setup={setup_type} "
+                f"daily_pnl={daily_pnl:.2f}% trigger={daily_trigger:.2f}% "
+                f"losses={consecutive_losses}/{streak_trigger}",
+            )
+        return True, "ok"
+
+    def _paper_loss_streak_guard_active(self) -> bool:
+        if not self._paper_validation_enabled():
+            return False
+        if not bool(self._paper_validation.get("loss_streak_guard_enabled", True)):
+            return False
+        risk_state = getattr(self._risk, "state", None)
+        daily_pnl = float(getattr(risk_state, "daily_pnl_pct", 0.0) or 0.0)
+        consecutive_losses = int(getattr(risk_state, "consecutive_losses", 0) or 0)
+        daily_trigger = float(
+            self._paper_validation.get("loss_streak_guard_daily_loss_pct", -2.0) or -2.0
+        )
+        streak_trigger = int(
+            self._paper_validation.get("loss_streak_guard_consecutive_losses", 2) or 2
+        )
+        daily_active = daily_trigger < 0.0 and daily_pnl <= daily_trigger
+        streak_active = streak_trigger > 0 and consecutive_losses >= streak_trigger
+        return daily_active or streak_active
+
+    def _paper_loss_streak_guard_check(
+        self,
+        breakdown: SignalBreakdown,
+        threshold: float,
+    ) -> tuple[bool, str]:
+        if not self._paper_loss_streak_guard_active():
+            return True, "ok"
+
+        score = float(getattr(breakdown, "total_score", 0.0) or 0.0)
+        quality = float(getattr(breakdown, "setup_quality_score", 0.0) or 0.0)
+        min_score = threshold + float(
+            self._paper_validation.get("loss_streak_guard_min_score_buffer", 8.0) or 8.0
+        )
+        min_quality = float(
+            self._paper_validation.get("loss_streak_guard_min_setup_quality", 68.0) or 68.0
+        )
+        if score < min_score:
+            return False, f"loss-streak guard: score={score:.1f} < {min_score:.1f}"
+        if quality < min_quality:
+            return False, f"loss-streak guard: setup_quality={quality:.1f} < {min_quality:.1f}"
+
+        ev = getattr(breakdown, "ev_result", None)
+        require_ev = bool(self._paper_validation.get("loss_streak_guard_require_ev", True))
+        if ev is None:
+            if require_ev:
+                return False, "loss-streak guard: ev=none"
+            return True, "ok"
+
+        min_pwin = float(
+            self._paper_validation.get("loss_streak_guard_min_p_win", 0.42) or 0.42
+        )
+        min_ev = float(
+            self._paper_validation.get("loss_streak_guard_min_ev_net_pct", 0.0) or 0.0
+        )
+        p_win = float(getattr(ev, "p_win", 0.0) or 0.0)
+        ev_net = float(getattr(ev, "ev_net_pct", 0.0) or 0.0)
+        if p_win < min_pwin:
+            return False, f"loss-streak guard: p_win={p_win:.3f} < {min_pwin:.3f}"
+        if ev_net < min_ev:
+            return False, f"loss-streak guard: ev_net={ev_net:+.3f}% < {min_ev:+.3f}%"
+        return True, "ok"
+
+    def _paper_loss_streak_size_cap(self) -> float | None:
+        if not self._paper_loss_streak_guard_active():
+            return None
+        cap = self._paper_validation.get("loss_streak_guard_max_total_scale", 0.35)
+        try:
+            return max(0.05, float(cap))
+        except (TypeError, ValueError):
+            return 0.35
+
+    def _paper_ev_stress_tightening_active(self) -> bool:
+        if not self._paper_validation_enabled() or not self._ev_gate_enabled():
+            return False
+        risk_state = getattr(self._risk, "state", None)
+        daily_pnl = float(getattr(risk_state, "daily_pnl_pct", 0.0) or 0.0)
+        consecutive_losses = int(getattr(risk_state, "consecutive_losses", 0) or 0)
+        daily_trigger = float(
+            self._paper_validation.get("stress_tighten_daily_loss_pct", -3.0) or -3.0
+        )
+        streak_trigger = int(
+            self._paper_validation.get("stress_tighten_consecutive_losses", 3) or 3
+        )
+        daily_active = daily_trigger < 0.0 and daily_pnl <= daily_trigger
+        streak_active = streak_trigger > 0 and consecutive_losses >= streak_trigger
+        return daily_active or streak_active
+
+    def _paper_stress_allows_ev(self, breakdown: SignalBreakdown) -> bool:
+        if not self._paper_ev_stress_tightening_active():
+            return True
+        ev = getattr(breakdown, "ev_result", None)
+        if ev is None:
+            return True
+        min_ev = float(self._paper_validation.get("stress_min_ev_net_pct", 0.0) or 0.0)
+        return float(getattr(ev, "ev_net_pct", 0.0) or 0.0) >= min_ev
+
+    def _paper_ev_observation_floor_allows(self, breakdown: SignalBreakdown) -> tuple[bool, str]:
+        if not self._paper_validation_enabled():
+            return True, "paper validation disabled"
+        if self._ev_gate_enabled():
+            return True, "EV gate enabled"
+        if not bool(self._paper_validation.get("ev_observation_floor_enabled", False)):
+            return True, "observation floor disabled"
+
+        ev = getattr(breakdown, "ev_result", None)
+        if ev is None:
+            return True, "ev=none"
+
+        p_win = float(getattr(ev, "p_win", 0.0) or 0.0)
+        ev_net = float(getattr(ev, "ev_net_pct", 0.0) or 0.0)
+        min_p_win = float(self._paper_validation.get("ev_observation_min_p_win", 0.30) or 0.30)
+        max_deficit = float(
+            self._paper_validation.get("ev_observation_max_deficit_pct", 0.75) or 0.75
+        )
+        if p_win < min_p_win and ev_net < -max_deficit:
+            return (
+                False,
+                f"p_win={p_win:.3f} < {min_p_win:.3f} "
+                f"and ev_net={ev_net:+.3f}% < -{max_deficit:.3f}%",
+            )
+        return True, "ok"
 
     def _paper_high_conviction_candidate(self, breakdown: SignalBreakdown, threshold: float) -> bool:
         ev = breakdown.ev_result
@@ -456,17 +892,185 @@ class NinjaTrader:
         probation_score = max(floor + 3.0, threshold)
 
         if stage == "bootstrap":
-            if breakdown.total_score >= bootstrap_score and ev.ev_net_pct >= -bootstrap_deficit:
+            if breakdown.total_score >= bootstrap_score and ev.ev_net_pct >= 0.0:
                 return "bootstrap"
             if self._paper_high_conviction_candidate(breakdown, threshold):
                 return "bootstrap"
             return None
 
-        if breakdown.total_score >= probation_score and ev.ev_net_pct >= -probation_deficit:
+        if breakdown.total_score >= probation_score and ev.ev_net_pct >= 0.0:
             return "probation"
         if self._paper_high_conviction_candidate(breakdown, threshold):
             return "probation"
         return None
+
+    def _paper_positive_ev_probe_mode(self, breakdown: SignalBreakdown, threshold: float) -> str | None:
+        if not self._paper_validation_enabled():
+            return None
+        if not bool(self._paper_validation.get("positive_ev_probe_enabled", False)):
+            return None
+        ev = getattr(breakdown, "ev_result", None)
+        if ev is None or not getattr(breakdown, "ev_ok", False):
+            return None
+        if not getattr(breakdown, "smart_money_ok", False):
+            return None
+        if not self._paper_stress_allows_ev(breakdown):
+            return None
+
+        stage = self._paper_ev_stage(int(getattr(ev, "trade_count", 0) or 0))
+        if stage == "hard_reject":
+            return None
+
+        min_ev = float(self._paper_validation.get("positive_ev_probe_min_ev_net_pct", 0.50) or 0.50)
+        min_pwin = float(self._paper_validation.get("positive_ev_probe_min_p_win", 0.53) or 0.53)
+        if float(getattr(ev, "ev_net_pct", 0.0) or 0.0) < min_ev:
+            return None
+        if float(getattr(ev, "p_win", 0.0) or 0.0) < min_pwin:
+            return None
+
+        direction = str(getattr(breakdown, "direction", "") or "")
+        regime = breakdown.regime.value if getattr(breakdown, "regime", None) else ""
+        sm_signal = getattr(breakdown, "smart_money", None)
+        sm_phase = sm_signal.phase.value if sm_signal else "neutral"
+        sm_score = float(getattr(sm_signal, "score", 0.0) or 0.0)
+        sleeve = str(getattr(breakdown, "strategy_sleeve", "") or "neutral")
+
+        allowed_dirs = set(self._paper_validation.get("positive_ev_probe_allowed_directions", ["short"]) or ["short"])
+        allowed_regimes = set(self._paper_validation.get("positive_ev_probe_allowed_regimes", ["trending_expansion"]) or ["trending_expansion"])
+        allowed_phases = set(self._paper_validation.get("positive_ev_probe_allowed_sm_phases", ["liquidity_sweep"]) or ["liquidity_sweep"])
+        allowed_sleeves = set(self._paper_validation.get("positive_ev_probe_allowed_sleeves", ["neutral", "reversal"]) or ["neutral", "reversal"])
+        if direction not in allowed_dirs or regime not in allowed_regimes or sm_phase not in allowed_phases:
+            return None
+        if sleeve not in allowed_sleeves:
+            return None
+
+        min_sm_score = float(self._paper_validation.get("positive_ev_probe_min_sm_score", 75.0) or 75.0)
+        if sm_score < min_sm_score:
+            return None
+
+        score_floor = float(self._paper_validation.get("positive_ev_probe_min_score", 30.0) or 30.0)
+        max_deficit = float(self._paper_validation.get("positive_ev_probe_max_score_deficit", 12.0) or 12.0)
+        required_score = max(score_floor, float(threshold) - max_deficit)
+        if self._positive_ev_probe_score_basis(breakdown) < required_score:
+            return None
+        return stage
+
+    @staticmethod
+    def _positive_ev_probe_score_basis(breakdown: SignalBreakdown) -> float:
+        return max(
+            float(getattr(breakdown, "total_score", 0.0) or 0.0),
+            float(getattr(breakdown, "pre_gate_score", 0.0) or 0.0),
+        )
+
+    def _signal_confirmation_allowed(self, breakdown: SignalBreakdown, threshold: float) -> bool:
+        if float(getattr(breakdown, "total_score", 0.0) or 0.0) >= float(threshold):
+            return True
+        return self._paper_positive_ev_probe_mode(breakdown, threshold) is not None
+
+    @staticmethod
+    def _bounded(value: float, lo: float, hi: float) -> float:
+        return min(hi, max(lo, float(value or 0.0)))
+
+    @staticmethod
+    def _clip_probability(value: float, *, default: float = 0.5) -> float:
+        try:
+            p = float(value)
+        except (TypeError, ValueError):
+            p = default
+        if not math.isfinite(p):
+            p = default
+        return min(0.99, max(0.01, p))
+
+    @classmethod
+    def _logit(cls, probability: float) -> float:
+        p = cls._clip_probability(probability)
+        return math.log(p / (1.0 - p))
+
+    @staticmethod
+    def _sigmoid(value: float) -> float:
+        if value >= 0:
+            z = math.exp(-value)
+            return 1.0 / (1.0 + z)
+        z = math.exp(value)
+        return z / (1.0 + z)
+
+    def _probabilistic_candidate_rank(
+        self,
+        breakdown: SignalBreakdown,
+        *,
+        ml_p_win: float,
+        regime_scale: float,
+        cohort_bonus: float,
+    ) -> tuple[float, float, float, float, float]:
+        """Rank admitted candidates by posterior win probability and expected utility."""
+        ev = getattr(breakdown, "ev_result", None)
+        total_score = float(getattr(breakdown, "total_score", 0.0) or 0.0)
+        setup_quality = self._bounded(
+            float(getattr(breakdown, "setup_quality_score", 50.0) or 50.0),
+            0.0,
+            100.0,
+        )
+
+        ev_p_win = self._clip_probability(getattr(ev, "p_win", 0.5) if ev else 0.5)
+        ml_probability = self._clip_probability(ml_p_win)
+        quality_probability = self._clip_probability(0.35 + 0.30 * (setup_quality / 100.0))
+        ev_conf = self._bounded(float(getattr(ev, "confidence", 0.0) or 0.0) if ev else 0.0, 0.0, 1.0)
+
+        # Bayesian-style log-odds blend: EV posterior is primary, ML is a
+        # second model, and setup quality is a weak structural prior.
+        ev_weight = 0.60 + 0.25 * ev_conf
+        ml_weight = 0.25
+        quality_weight = 0.15
+        posterior_log_odds = (
+            ev_weight * self._logit(ev_p_win)
+            + ml_weight * self._logit(ml_probability)
+            + quality_weight * self._logit(quality_probability)
+        ) / (ev_weight + ml_weight + quality_weight)
+        posterior_p = self._sigmoid(posterior_log_odds)
+
+        conservative_p = float(getattr(ev, "conservative_p_win", 0.0) or 0.0) if ev else 0.0
+        if conservative_p > 0.0:
+            conservative_p = self._clip_probability(conservative_p)
+            posterior_p = posterior_p * (1.0 - 0.35 * ev_conf) + conservative_p * (0.35 * ev_conf)
+
+        ev_net = self._bounded(float(getattr(ev, "ev_net_pct", 0.0) or 0.0) if ev else 0.0, -2.0, 2.0)
+        conservative_ev = self._bounded(
+            float(getattr(ev, "conservative_ev_net_pct", ev_net) or 0.0) if ev else 0.0,
+            -2.0,
+            2.0,
+        )
+        avg_win_pct = max(0.0, float(getattr(ev, "avg_win_pct", 0.0) or 0.0) if ev else 0.0)
+        avg_loss_pct = max(0.0, float(getattr(ev, "avg_loss_pct", 0.0) or 0.0) if ev else 0.0)
+        cost_pct = max(0.0, float(getattr(ev, "cost_pct", 0.0) or 0.0) if ev else 0.0)
+        funding_pct = float(getattr(ev, "funding_cost_pct", 0.0) or 0.0) if ev else 0.0
+
+        if avg_win_pct > 0.0 and avg_loss_pct > 0.0:
+            win_return = max(-0.95, (avg_win_pct - cost_pct - funding_pct) / 100.0)
+            loss_return = min(0.95, (avg_loss_pct + cost_pct + abs(funding_pct)) / 100.0)
+            expected_log_growth_pct = (
+                posterior_p * math.log1p(win_return)
+                + (1.0 - posterior_p) * math.log1p(-loss_return)
+            ) * 100.0
+        else:
+            expected_log_growth_pct = ev_net
+
+        rank_score = (
+            total_score
+            + (posterior_p - 0.50) * 40.0
+            + expected_log_growth_pct * 12.0
+            + ev_net * 2.0
+            + conservative_ev * ev_conf * 2.0
+            + (setup_quality - 50.0) / 12.0
+            + float(getattr(breakdown, "strategy_ranking_bonus", 0.0) or 0.0)
+            + float(cohort_bonus or 0.0)
+        )
+        return (
+            rank_score,
+            float(regime_scale or 1.0),
+            posterior_p,
+            expected_log_growth_pct,
+            total_score,
+        )
 
     async def start(self) -> None:
         cleanup_stats = cleanup_workspace_artifacts()
@@ -542,6 +1146,22 @@ class NinjaTrader:
                         self._consecutive_wins = 0
                         self._risk.state.kill_switch_reason = ""
                         self._risk.state.paused_until_ts = 0.0
+                        self._risk.state.open_trade_count = 0
+                        self._risk.state.open_risk_pct = 0.0
+                        self._risk.state.symbol_risk_pct = {}
+                        self._risk.state.direction_risk_pct = {}
+                        trade_mgr = getattr(self, "_trade_mgr", None)
+                        open_book = getattr(trade_mgr, "_trades", None)
+                        if isinstance(open_book, dict) and open_book:
+                            dropped = len(open_book)
+                            open_book.clear()
+                            save_state = getattr(trade_mgr, "_save_state", None)
+                            if callable(save_state):
+                                save_state()
+                            log.info(
+                                "Paper reset: cleared %d restored open paper trades",
+                                dropped,
+                            )
                         log.info(
                             "Paper reset: ignoring persisted state and re-seeding equity to $%.2f",
                             float(paper_equity),
@@ -631,8 +1251,14 @@ class NinjaTrader:
                     _send_tg_heartbeat = True
                     top_names: list[str] = []  # populated after scoring below
 
+                await self._maybe_send_crypto_news_report()
+
                 # ── Scan pairs ────────────────────────────────────────────
-                priority = self._cohort_policy.recommend_symbols(self._learner._trade_log)
+                lifecycle_report = self._lifecycle.build_report(self._learner._trade_log)
+                priority = self._cohort_policy.recommend_symbols(
+                    self._learner._trade_log,
+                    primary_edge=lifecycle_report.get("primary_edge"),
+                )
                 pairs = await self._scanner.scan(priority_symbols=priority)
 
                 if not pairs:
@@ -653,6 +1279,16 @@ class NinjaTrader:
                     log.warning("fetch_snapshots timed out after 180s — skipping cycle")
                     await asyncio.sleep(scan_interval)
                     continue
+
+                sector_rotations = compute_sector_rotation(snapshots)
+                attach_sector_rotation(snapshots, sector_rotations)
+                if sector_rotations:
+                    top_rotation = min(sector_rotations.values(), key=lambda item: item.rank or 999)
+                    log.info(
+                        "Sector rotation top: %s %s rel_btc=%.2f%% breadth=%.2f conf=%.2f",
+                        top_rotation.sector, top_rotation.state, top_rotation.relative_btc_pct,
+                        top_rotation.breadth, top_rotation.confidence,
+                    )
 
                 # ── Score & pick top candidates ───────────────────────────
                 breakdowns = self._scorer.score_many(snapshots)
@@ -675,7 +1311,6 @@ class NinjaTrader:
                 readiness_report = self._readiness.check(
                     self._learner._trade_log, self._ml, self._equity_curve
                 )
-                lifecycle_report = self._lifecycle.build_report(self._learner._trade_log)
                 jim_status = self._ml.status_report(self._learner._trade_log)
                 _tlog = self._learner._trade_log
                 _n_trades = len(_tlog)
@@ -761,7 +1396,7 @@ class NinjaTrader:
                     if sym in self._trade_mgr.open_symbols:
                         self._signal_confirm.pop(sym, None)
                         continue
-                    if b.total_score >= threshold:
+                    if self._signal_confirmation_allowed(b, threshold):
                         if sym not in self._signal_confirm:
                             self._signal_confirm[sym] = {"count": 1, "first_seen": now}
                         else:
@@ -795,21 +1430,6 @@ class NinjaTrader:
                 _regime_scale_map: dict[str, float] = {}
                 _cohort_bonus_map: dict[str, float] = {}
                 for b in breakdowns:
-                    paper_scope_allowed, paper_scope_reason = self._paper_trade_scope_check(b)
-                    if not paper_scope_allowed:
-                        _snap = snapshots.get(b.symbol)
-                        _thresh = self._threshold_for(b.regime)
-                        _thresh += getattr(b, "strategy_threshold_shift", 0.0)
-                        _fr = float(_snap.funding_rate) if _snap is not None else 0.0
-                        self._dataset_logger.log_no_trade(b, "paper_scope_blocked", snap=_snap)
-                        self._rej.log(
-                            stage="paper_scope",
-                            reason=paper_scope_reason,
-                            breakdown=b,
-                            threshold_required=_thresh,
-                            funding_rate=_fr,
-                        )
-                        continue
                     _snap = snapshots.get(b.symbol)
                     _thresh = self._threshold_for(b.regime)
                     _thresh += getattr(b, "strategy_threshold_shift", 0.0)
@@ -835,6 +1455,26 @@ class NinjaTrader:
                             b.ev_result.trade_count,
                         )
                         b.ev_ok = True
+                    if b.ev_ok and not self._paper_stress_allows_ev(b):
+                        log.info(
+                            "[%s] paper validation stress tightening blocked EV relax (ev_net=%+.3f%%)",
+                            b.symbol,
+                            b.ev_result.ev_net_pct if b.ev_result else 0.0,
+                        )
+                        b.ev_ok = False
+                    _paper_positive_ev_probe = self._paper_positive_ev_probe_mode(b, _thresh)
+                    if _paper_positive_ev_probe and not b.regime_ok and b.smart_money_ok and b.ev_ok:
+                        log.info(
+                            "[%s] paper validation positive-EV probe unblocked regime gate "
+                            "(%s, regime=%s, score_basis=%.1f, ev_net=%+.3f%% p_win=%.3f)",
+                            b.symbol,
+                            _paper_positive_ev_probe,
+                            b.regime.value if b.regime else "?",
+                            self._positive_ev_probe_score_basis(b),
+                            b.ev_result.ev_net_pct if b.ev_result else 0.0,
+                            b.ev_result.p_win if b.ev_result else 0.0,
+                        )
+                        b.regime_ok = True
                     if not b.all_gates_passed:
                         if not b.regime_ok:
                             _gate_reason = "gate_regime_fail"
@@ -864,19 +1504,85 @@ class NinjaTrader:
                                         b.symbol, b.direction, _df, _snap.last_price,
                                         strategy_sleeve=b.strategy_sleeve,
                                         ev_result=b.ev_result, kelly_scale=1.0, backtest=True,
+                                        setup_passport=setup_passport_with_market_context(b),
                                     )
                                     if _sh_setup is not None:
                                         self._shadow.on_signal(b, _sh_setup)
                             except Exception as _e:
                                 log.debug("shadow counterfactual %s: %s", b.symbol, _e)
                         continue
-                    if b.total_score < _thresh:
-                        self._dataset_logger.log_no_trade(b, "score_below_threshold", snap=_snap)
+                    _ev_floor_allowed, _ev_floor_reason = self._paper_ev_observation_floor_allows(b)
+                    if not _ev_floor_allowed:
+                        self._dataset_logger.log_no_trade(b, "paper_ev_observation_floor_blocked", snap=_snap)
                         self._rej.log(
-                            stage="score_threshold",
-                            reason=f"score={b.total_score:.1f} < thresh={_thresh:.1f}",
+                            stage="gate_ev",
+                            reason=f"paper observation floor: {_ev_floor_reason}",
                             breakdown=b, threshold_required=_thresh, funding_rate=_fr,
                         )
+                        continue
+                    _paper_positive_ev_probe = self._paper_positive_ev_probe_mode(b, _thresh)
+                    if b.total_score < _thresh:
+                        if _paper_positive_ev_probe:
+                            log.info(
+                                "[%s] paper validation positive-EV probe enabled (%s, score=%.1f<thresh=%.1f ev_net=%+.3f%% p_win=%.3f)",
+                                b.symbol,
+                                _paper_positive_ev_probe,
+                                b.total_score,
+                                _thresh,
+                                b.ev_result.ev_net_pct if b.ev_result else 0.0,
+                                b.ev_result.p_win if b.ev_result else 0.0,
+                            )
+                        else:
+                            self._dataset_logger.log_no_trade(b, "score_below_threshold", snap=_snap)
+                            self._rej.log(
+                                stage="score_threshold",
+                                reason=f"score={b.total_score:.1f} < thresh={_thresh:.1f}",
+                                breakdown=b, threshold_required=_thresh, funding_rate=_fr,
+                            )
+                            continue
+                    paper_scope_allowed, paper_scope_reason = self._paper_trade_scope_check(b)
+                    if not paper_scope_allowed:
+                        if _paper_positive_ev_probe:
+                            log.info(
+                                "[%s] paper validation positive-EV probe bypassed scope (%s)",
+                                b.symbol,
+                                paper_scope_reason,
+                            )
+                        else:
+                            self._dataset_logger.log_no_trade(b, "paper_scope_blocked", snap=_snap)
+                            self._rej.log(
+                                stage="paper_scope",
+                                reason=paper_scope_reason,
+                                breakdown=b,
+                                threshold_required=_thresh,
+                                funding_rate=_fr,
+                            )
+                            continue
+                    exp_setup_ok, exp_setup_reason = self._paper_experimental_setup_stress_check(b)
+                    if not exp_setup_ok:
+                        self._dataset_logger.log_no_trade(b, "experimental_setup_stress_blocked", snap=_snap)
+                        self._rej.log(
+                            stage="experimental_setup_stress",
+                            reason=exp_setup_reason,
+                            breakdown=b,
+                            threshold_required=_thresh,
+                            funding_rate=_fr,
+                        )
+                        if self._shadow:
+                            self._shadow.record_rejected(b, stage="experimental_setup_stress")
+                        continue
+                    loss_streak_ok, loss_streak_reason = self._paper_loss_streak_guard_check(b, _thresh)
+                    if not loss_streak_ok:
+                        self._dataset_logger.log_no_trade(b, "loss_streak_guard_blocked", snap=_snap)
+                        self._rej.log(
+                            stage="loss_streak_guard",
+                            reason=loss_streak_reason,
+                            breakdown=b,
+                            threshold_required=_thresh,
+                            funding_rate=_fr,
+                        )
+                        if self._shadow:
+                            self._shadow.record_rejected(b, stage="loss_streak_guard")
                         continue
                     if b.symbol in self._trade_mgr.open_symbols:
                         continue
@@ -1034,13 +1740,11 @@ class NinjaTrader:
                         attribution_report,
                     )
                 eligible.sort(
-                    key=lambda x: (
-                        x.total_score
-                        + (_ml_p_win_map.get(x.symbol, 0.5) - 0.5) * 20.0
-                        + getattr(x, "strategy_ranking_bonus", 0.0)
-                        + _cohort_bonus_map.get(x.symbol, 0.0),
-                        _regime_scale_map.get(x.symbol, 1.0),
-                        _ml_p_win_map.get(x.symbol, 0.5),
+                    key=lambda x: self._probabilistic_candidate_rank(
+                        x,
+                        ml_p_win=_ml_p_win_map.get(x.symbol, 0.5),
+                        regime_scale=_regime_scale_map.get(x.symbol, 1.0),
+                        cohort_bonus=_cohort_bonus_map.get(x.symbol, 0.0),
                     ),
                     reverse=True,
                 )
@@ -1051,7 +1755,11 @@ class NinjaTrader:
                 # downside risk of including simulated outcomes.
                 self._scorer.set_trade_log(self._learner._trade_log)
 
+                rotations_this_cycle = 0
                 for bd in eligible:
+                    rotation_victim: OpenTrade | None = None
+                    rotation_price = 0.0
+                    rotation_reason = ""
                     _bd_thresh = max(
                         0.0,
                         self._threshold_for(bd.regime)
@@ -1066,14 +1774,25 @@ class NinjaTrader:
                     # FIX #8: check risk guard BEFORE expensive setup calculation
                     can_open, reason = self._risk.can_open_trade()
                     if not can_open:
-                        log.info("[%s] Risk guard blocked: %s", bd.symbol, reason)
-                        self._rej.log(
-                            stage="risk_guard", reason=reason, breakdown=bd,
-                            threshold_required=_bd_thresh, funding_rate=_bd_fr,
+                        if str(reason).startswith("max_open_trades"):
+                            rotation_victim, rotation_price, rotation_reason = self._select_rotation_victim(
+                                bd, snapshots, rotations_this_cycle
+                            )
+                        if rotation_victim is None:
+                            log.info("[%s] Risk guard blocked: %s", bd.symbol, reason)
+                            if str(reason).startswith("max_open_trades") and rotation_reason:
+                                log.info("[%s] rotation skipped: %s", bd.symbol, rotation_reason)
+                            self._rej.log(
+                                stage="risk_guard", reason=reason, breakdown=bd,
+                                threshold_required=_bd_thresh, funding_rate=_bd_fr,
+                            )
+                            if self._shadow:
+                                self._shadow.record_rejected(bd, stage="risk_guard")
+                            continue
+                        log.info(
+                            "[%s] position rotation candidate selected; %s pending downstream gates before any close (%s)",
+                            bd.symbol, rotation_victim.symbol, rotation_reason,
                         )
-                        if self._shadow:
-                            self._shadow.record_rejected(bd, stage="risk_guard")
-                        continue
 
                     snap = snapshots.get(bd.symbol)
                     if snap is None:
@@ -1200,7 +1919,10 @@ class NinjaTrader:
                     if _rscale < 1.0:
                         total_scale *= _rscale
                         log.info("[%s] regime_scale=%.2fx applied", bd.symbol, _rscale)
-                    if self._paper_high_conviction_candidate(bd, _bd_thresh):
+                    if (
+                        self._paper_high_conviction_candidate(bd, _bd_thresh)
+                        and not self._paper_loss_streak_guard_active()
+                    ):
                         floor = float(
                             self._paper_validation.get("high_conviction_min_total_scale", 0.30)
                             or 0.30
@@ -1213,6 +1935,15 @@ class NinjaTrader:
                                 total_scale,
                             )
                             total_scale = floor
+                    loss_cap = self._paper_loss_streak_size_cap()
+                    if loss_cap is not None and total_scale > loss_cap:
+                        log.info(
+                            "[%s] paper loss-streak size cap %.2fx applied (raw %.2fx)",
+                            bd.symbol,
+                            loss_cap,
+                            total_scale,
+                        )
+                        total_scale = loss_cap
                     if fm_decision.notes or ml_confidence > 1.0:
                         conf_note = f"Jim confidence {ml_confidence:.2f}x (p_win={_p_win:.0%})" if ml_confidence > 1.0 else ""
                         all_notes = ([conf_note] if conf_note else []) + fm_decision.notes
@@ -1239,6 +1970,7 @@ class NinjaTrader:
                         min_notional_usd=self._client.min_notional(bd.symbol) if _live else 0.0,
                         short_setup_label=_short_setup_label,
                         short_setup_confidence=_short_setup_confidence,
+                        setup_passport=setup_passport_with_market_context(bd),
                     )
                     if setup is None:
                         setup_reason = (
@@ -1298,6 +2030,9 @@ class NinjaTrader:
                         "trending": 4, "accumulation": 3, "liquidity_sweep": 2,
                         "neutral": 1, "distribution": 0, "chaos": -1,
                     }
+                    market_ctx = getattr(bd, "market_context", None)
+                    sector_rotation = getattr(bd, "sector_rotation", None)
+                    ts_diag = getattr(bd, "time_series", None)
                     self._pending_scores[bd.symbol] = {
                         # Raw signal scores
                         "trend_strength": bd.trend_strength,
@@ -1326,14 +2061,49 @@ class NinjaTrader:
                         "ev_ok": 1.0 if bd.ev_ok else 0.0,
                         # Edge: gate combination (3-bit signal quality)
                         "gates_passed": float(bd.regime_ok) + float(bd.smart_money_ok) + float(bd.ev_ok),
-                        # Time of day (UTC hour) — session awareness
+                        # Time of day (UTC) — session/context awareness
                         "hour_utc": float(time.gmtime().tm_hour),
-                        # Strategy sleeve metadata for later attribution
+                        "hour_of_day": int(time.gmtime().tm_hour),
+                        "day_of_week": int(time.gmtime().tm_wday),
+                        # Broad-market context at entry, used for later attribution.
+                        "market_risk_on_state": str(getattr(market_ctx, "risk_on_state", "unknown") or "unknown"),
+                        "market_rotation_state": str(getattr(market_ctx, "rotation_state", "unknown") or "unknown"),
+                        "market_btc_trend": str(getattr(market_ctx, "btc_trend", "unknown") or "unknown"),
+                        "market_eth_btc_trend": str(getattr(market_ctx, "eth_btc_trend", "unknown") or "unknown"),
+                        "market_btc_d_trend": str(getattr(market_ctx, "btc_d_trend", "unknown") or "unknown"),
+                        "market_total_trend": str(getattr(market_ctx, "total_trend", "unknown") or "unknown"),
+                        "market_context_confidence": float(getattr(market_ctx, "confidence", 0.0) or 0.0),
+                        "sector_rotation_state": str(getattr(sector_rotation, "state", "unknown") or "unknown"),
+                        "sector_rotation_rank": int(getattr(sector_rotation, "rank", 0) or 0),
+                        "sector_rotation_relative_btc_pct": float(getattr(sector_rotation, "relative_btc_pct", 0.0) or 0.0),
+                        "sector_rotation_breadth": float(getattr(sector_rotation, "breadth", 0.0) or 0.0),
+                        "sector_rotation_confidence": float(getattr(sector_rotation, "confidence", 0.0) or 0.0),
+                        # Causal time-series diagnostics at entry.
+                        "time_series_state": str(getattr(ts_diag, "state", "unknown") if ts_diag else "unknown"),
+                        "time_series_ewma_vol_pct": float(getattr(ts_diag, "ewma_vol_pct", 0.0) if ts_diag else 0.0),
+                        "time_series_realized_vol_pct": float(getattr(ts_diag, "realized_vol_pct", 0.0) if ts_diag else 0.0),
+                        "time_series_volatility_ratio": float(getattr(ts_diag, "volatility_ratio", 1.0) if ts_diag else 1.0),
+                        "time_series_latest_abs_return_z": float(getattr(ts_diag, "latest_abs_return_z", 0.0) if ts_diag else 0.0),
+                        "time_series_drift_t_stat": float(getattr(ts_diag, "drift_t_stat", 0.0) if ts_diag else 0.0),
+                        "time_series_stability_score": float(getattr(ts_diag, "stability_score", 0.0) if ts_diag else 0.0),
+                        "time_series_markov_state": str(getattr(ts_diag, "markov_state", "unknown") if ts_diag else "unknown"),
+                        "time_series_markov_bull_prob": float(getattr(ts_diag, "markov_bull_prob", 0.0) if ts_diag else 0.0),
+                        "time_series_markov_bear_prob": float(getattr(ts_diag, "markov_bear_prob", 0.0) if ts_diag else 0.0),
+                        "time_series_markov_sideways_prob": float(getattr(ts_diag, "markov_sideways_prob", 0.0) if ts_diag else 0.0),
+                        "time_series_markov_edge": float(getattr(ts_diag, "markov_edge", 0.0) if ts_diag else 0.0),
+                        "time_series_score_mult": float(getattr(bd, "time_series_score_mult", 1.0) or 1.0),
+                        "time_series_size_mult": float(getattr(bd, "time_series_size_mult", 1.0) or 1.0),
+                        "time_series_reason": str(getattr(bd, "time_series_reason", "") or ""),
+                        # Strategy sleeve + setup passport metadata for later attribution
                         "strategy_sleeve": bd.strategy_sleeve,
                         "strategy_reason": bd.strategy_reason,
                         "exit_profile": setup.exit_profile,
                         "strategy_score_mult": float(bd.strategy_score_mult),
                         "strategy_size_mult": float(bd.strategy_size_mult),
+                        "setup_type": getattr(bd, "setup_type", "unknown"),
+                        "setup_quality_score": float(getattr(bd, "setup_quality_score", 0.0) or 0.0),
+                        "setup_passport": setup_passport_with_market_context(bd),
+                        "sector": str(setup_passport_with_market_context(bd).get("sector", "unknown")),
                         "dispersion_value": float(bd.dispersion_value),
                         "signal_type": f"{bd.regime.value if bd.regime else 'unknown'}|{sm.phase.value if sm else 'neutral'}",
                         "entry_reason": bd.strategy_reason,
@@ -1349,6 +2119,26 @@ class NinjaTrader:
                         "short_setup_label": _short_setup_label,
                         "short_setup_confidence": _short_setup_confidence,
                     }
+                    if rotation_victim is not None:
+                        closed = await self._trade_mgr.close_for_rotation(
+                            rotation_victim.symbol,
+                            rotation_price,
+                            reason=f"rotation_upgrade:{bd.symbol}",
+                        )
+                        if not closed:
+                            self._pending_scores.pop(bd.symbol, None)
+                            log.warning(
+                                "[%s] rotation close failed for %s — skipping open",
+                                bd.symbol, rotation_victim.symbol,
+                            )
+                            continue
+                        rotations_this_cycle += 1
+                        self._record_position_rotation()
+                        log.info(
+                            "[%s] rotation freed slot by closing %s @ %.4f",
+                            bd.symbol, rotation_victim.symbol, rotation_price,
+                        )
+
                     # CRITICAL: only notify + record if trade actually opened
                     opened = await self._trade_mgr.open(setup)
                     if not opened:
@@ -1461,7 +2251,9 @@ class NinjaTrader:
             log.debug("Brain daily return record failed: %s", _exc)
 
     async def _on_trade_closed(self, trade: OpenTrade, pnl: float, reason: str) -> None:
-        scores = self._pending_scores.pop(trade.symbol, {})
+        scores = enrich_closed_trade_scores(
+            self._pending_scores.pop(trade.symbol, {}), trade, self._cfg
+        )
         entry_p = trade.setup.entry_price
         # Prefer the actual market close price stamped by TradeManager
         # (covers every exit reason: stop_loss, trailing_stop, tp1, tp2,
@@ -1517,7 +2309,17 @@ class NinjaTrader:
             fees_slippage_pct=round((float(self._cfg.get("ev_model", {}).get("taker_fee_pct", 0.04)) + float(self._cfg.get("ev_model", {}).get("slippage_pct", 0.05))) * 2, 4),
             timeframe=str(scores.get("timeframe", self._cfg["timeframes"]["primary"])),
             session=str(scores.get("session", "unknown")),
+            hour_of_day=int(scores.get("hour_of_day", scores.get("hour_utc", -1))),
+            day_of_week=int(scores.get("day_of_week", -1)),
             asset=str(scores.get("asset", trade.symbol.split('/')[0])),
+            sector=str(scores.get("sector", sector_for_asset(asset_from_symbol(trade.symbol)))),
+            market_risk_on_state=str(scores.get("market_risk_on_state", "unknown")),
+            market_rotation_state=str(scores.get("market_rotation_state", "unknown")),
+            market_btc_trend=str(scores.get("market_btc_trend", "unknown")),
+            market_eth_btc_trend=str(scores.get("market_eth_btc_trend", "unknown")),
+            market_btc_d_trend=str(scores.get("market_btc_d_trend", "unknown")),
+            market_total_trend=str(scores.get("market_total_trend", "unknown")),
+            market_context_confidence=float(scores.get("market_context_confidence", 0.0) or 0.0),
             signal_type=str(scores.get("signal_type", "unknown")),
             entry_reason=str(scores.get("entry_reason", "unknown")),
             volatility_bucket=str(scores.get("volatility_bucket", "unknown")),
@@ -1526,6 +2328,11 @@ class NinjaTrader:
             lifecycle_status=str(scores.get("lifecycle_status", "RESEARCH")),
         )
         self._learner.record_trade(record)
+        try:
+            self._trading_brain.record_closed_trade(record, self._learner._trade_log)
+        except Exception as _exc:
+            log.debug("Trading brain journal write failed: %s", _exc)
+
 
         # ── Adaptive Brain learning — feeds outcome to Thompson, ML, alpha decay ──
         try:
@@ -2035,6 +2842,40 @@ class NinjaTrader:
             interval_hours=audit_hours,
         )
 
+    async def _maybe_send_crypto_news_report(self) -> None:
+        tg_cfg = self._cfg.get("telegram", {}) or {}
+        interval_minutes = float(tg_cfg.get("crypto_news_interval_minutes", 60) or 0)
+        if interval_minutes <= 0:
+            return
+        report_interval = interval_minutes * 60
+        if time.time() - self._tg_crypto_news_ts < report_interval:
+            return
+        self._tg_crypto_news_ts = time.time()
+        limit = int(tg_cfg.get("crypto_news_limit", 5) or 5)
+        timeout_s = float(tg_cfg.get("crypto_news_timeout_seconds", 8.0) or 8.0)
+        try:
+            items = await fetch_crypto_news_highlights(
+                self._cfg,
+                limit=max(1, min(10, limit)),
+                timeout_s=max(1.0, timeout_s),
+            )
+        except Exception as exc:
+            log.debug("Crypto news report failed: %s", exc)
+            return
+        if not items:
+            return
+        narratives = await build_market_hot_narratives(
+            self._cfg,
+            items,
+            limit=max(1, min(10, limit)),
+        )
+        if not narratives:
+            return
+        await self._telegram.crypto_news_report(
+            narratives,
+            interval_minutes=interval_minutes,
+        )
+
     async def _transition_to_live(self) -> None:
         """Auto-switch from paper to live mode after all readiness criteria pass."""
         log.info("AUTO-LIVE: readiness criteria passed — preparing live transition")
@@ -2260,11 +3101,12 @@ class NinjaTrader:
 
     async def _price_map_with_open_trades(self, snapshots) -> dict[str, float]:
         price_map = {sym: snap.last_price for sym, snap in snapshots.items()}
-        missing = [symbol for symbol in self._trade_mgr.open_symbols if symbol not in price_map]
-        for symbol in missing:
+        for symbol in self._trade_mgr.open_symbols:
             try:
                 ticker = await self._client.fetch_ticker(symbol)
-                price_map[symbol] = float(ticker.get("last", 0) or 0)
+                live_price = float(ticker.get("last", 0) or 0)
+                if live_price > 0:
+                    price_map[symbol] = live_price
             except Exception as exc:
                 log.warning("Could not fetch price for open trade %s: %s", symbol, exc)
         return price_map

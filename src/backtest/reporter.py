@@ -8,7 +8,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich import box
 
-from src.backtest.engine import BacktestResult, BacktestTrade
+from src.backtest.engine import BacktestResult
 
 console = Console()
 
@@ -24,6 +24,7 @@ def print_trade_log(result: BacktestResult, max_rows: int = 30) -> None:
     tbl = Table(title=f"{result.symbol} — Trade Log (last {len(trades)})", box=box.SIMPLE)
     tbl.add_column("#", justify="right", style="dim")
     tbl.add_column("Dir", style="bold")
+    tbl.add_column("Setup", style="cyan")
     tbl.add_column("Entry", justify="right")
     tbl.add_column("Exit", justify="right")
     tbl.add_column("SL", justify="right")
@@ -39,6 +40,7 @@ def print_trade_log(result: BacktestResult, max_rows: int = 30) -> None:
         tbl.add_row(
             str(i),
             f"[{'green' if t.direction == 'long' else 'red'}]{t.direction}[/]",
+            str(getattr(t, "setup_type", "unknown") or "unknown"),
             f"{t.entry_price:.4f}",
             f"{t.exit_price:.4f}",
             f"{t.stop_loss:.4f}",
@@ -50,6 +52,8 @@ def print_trade_log(result: BacktestResult, max_rows: int = 30) -> None:
             t.exit_reason,
         )
     console.print(tbl)
+
+
 
 
 def print_score_calibration(results: list[BacktestResult]) -> None:
@@ -152,6 +156,13 @@ def print_summary(results: list[BacktestResult]) -> None:
     avg_initial = sum(r.initial_capital for r in results) / len(results) if results else 10000
     avg_final = sum(r.final_equity for r in results) / len(results) if results else avg_initial
 
+
+    setup_counts: dict[str, int] = {}
+    for r in results:
+        for t in r.closed_trades:
+            setup = str(getattr(t, "setup_type", "unknown") or "unknown")
+            setup_counts[setup] = setup_counts.get(setup, 0) + 1
+
     exit_reason_counts: dict[str, int] = {}
     for r in results:
         for t in r.closed_trades:
@@ -165,6 +176,7 @@ def print_summary(results: list[BacktestResult]) -> None:
         f"Avg equity   : {avg_initial:.0f} → {avg_final:.0f} USDT",
         "",
         "Exit breakdown: " + "  ".join(f"{k}={v}" for k, v in sorted(exit_reason_counts.items())),
+        "Setup breakdown: " + "  ".join(f"{k}={v}" for k, v in sorted(setup_counts.items())),
     ]
     console.print(Panel("\n".join(lines), title="Aggregate Results", border_style="cyan"))
 

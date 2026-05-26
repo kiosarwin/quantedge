@@ -570,9 +570,9 @@ class FundManager:
         )
         if open_risk_pct >= 4.5:
             return True, f"portfolio at max capacity ({open_risk_pct:.1f}% risk on)"
-        if drawdown_pct >= 10.0 and daily_pnl_pct < -2.0:
+        if drawdown_pct >= 10.0 and daily_pnl_pct < -2.0 and not paper_validation_mode:
             return True, f"double danger: {drawdown_pct:.1f}% drawdown + {daily_pnl_pct:.1f}% today"
-        if consecutive_losses >= 2 and daily_pnl_pct < -3.0:
+        if consecutive_losses >= 2 and daily_pnl_pct < -3.0 and not paper_validation_mode:
             return True, f"{consecutive_losses} consecutive losses on a bad day ({daily_pnl_pct:.1f}%)"
         if drawdown_pct >= 13.0 and not paper_validation_mode:
             return True, f"near max drawdown ({drawdown_pct:.1f}%) — capital preservation mode"

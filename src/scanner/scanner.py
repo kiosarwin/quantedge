@@ -19,7 +19,11 @@ class PairScanner:
 
     async def scan(self, priority_symbols: list[str] | None = None) -> list[str]:
         """Return filtered list of tradeable symbols."""
-        tickers = await self._client.fetch_tickers()
+        try:
+            tickers = await self._client.fetch_tickers()
+        except Exception as exc:
+            log.warning("Scanner ticker fetch failed: %s", exc)
+            return []
         markets = self._client.markets
 
         candidates: list[tuple[str, float]] = []
@@ -42,19 +46,21 @@ class PairScanner:
 
             candidates.append((symbol, volume_usdt))
 
-        # Sort by volume descending
+        # Sort by volume descending, then let the learned edge queue override
+        # position. A symbol with validated/probabilistic edge should not be
+        # buried simply because BTC/ETH majors have larger quote volume.
         candidates.sort(key=lambda x: x[1], reverse=True)
-        result = [sym for sym, _ in candidates]
+        volume_ranked = [sym for sym, _ in candidates]
 
-        # Bring historically profitable symbols into the front of the queue even
-        # when they fail the raw volume filter, provided the market itself is valid.
         priority_hits: list[str] = []
+        seen_priority: set[str] = set()
         for symbol in priority_symbols:
+            if symbol in seen_priority:
+                continue
+            seen_priority.add(symbol)
             ticker = tickers.get(symbol)
             market = markets.get(symbol, {})
             if ticker is None:
-                continue
-            if symbol in result:
                 continue
             if not self._is_valid_market(symbol, market):
                 continue
@@ -63,7 +69,8 @@ class PairScanner:
                 continue
             priority_hits.append(symbol)
 
-        result = priority_hits + result
+        priority_set = set(priority_hits)
+        result = priority_hits + [sym for sym in volume_ranked if sym not in priority_set]
         log.info("Scanner found %d eligible pairs", len(result))
         return result
 

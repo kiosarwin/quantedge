@@ -37,6 +37,7 @@ class _ClosedShadowTrade:
     scores: dict = field(default_factory=dict)
     symbol: str = ""
     direction: str = ""
+    sector: str = "unknown"
     entry_price: float = 0.0
     exit_price: float = 0.0
     opened_at: float = 0.0
@@ -139,6 +140,7 @@ class ShadowEngine:
             "scores": scores_dict or {},
             "symbol": sym,
             "direction": setup.direction,
+            "sector": str((setup.setup_passport or {}).get("sector", "unknown")),
             "entry_price": entry,
             "opened_at": time.time(),
         }
@@ -146,6 +148,7 @@ class ShadowEngine:
             "[SHADOW] Opened  %s %s  entry=%.4f  SL=%.4f  TP1=%.4f  TP2=%.4f",
             sym, setup.direction.upper(), entry, setup.stop_loss, setup.tp1, setup.tp2,
         )
+        self._save_state()
 
     def record_rejected(
         self, bd: SignalBreakdown, stage: str, features: dict | None = None
@@ -163,6 +166,7 @@ class ShadowEngine:
         if len(self._rejected) > 5000:
             self._rejected = self._rejected[-5000:]
         log.info("[SHADOW] Rejected %s %s stage=%s", bd.symbol, bd.direction, stage)
+        self._save_state()
 
     def on_tick(self, price_map: dict[str, float]) -> None:
         self._total_ticks += 1
@@ -214,6 +218,7 @@ class ShadowEngine:
                     scores=meta.get("scores", {}),
                     symbol=meta.get("symbol", sym),
                     direction=meta.get("direction", trade.direction),
+                    sector=meta.get("sector", "unknown"),
                     entry_price=meta.get("entry_price", trade.entry_price),
                     exit_price=trade.exit_price,
                     opened_at=meta.get("opened_at", 0.0),
@@ -309,23 +314,63 @@ class ShadowEngine:
         Only includes trades that have full feature scores (set via on_signal scores_dict).
         """
         from src.learning.learner import TradeRecord
-        return [
-            TradeRecord(
-                symbol=t.symbol or "shadow",
-                direction=t.direction or "long",
-                entry_price=t.entry_price,
-                exit_price=t.exit_price,
-                pnl_usd=t.pnl_usd,
-                pnl_pct=t.pnl_pct,
-                reason=t.exit_reason,
-                # Tag shadow so ML can learn to discount simulator-distribution artifacts
-                scores={**t.scores, "is_shadow": 1.0},
-                opened_at=t.opened_at,
-                closed_at=t.closed_at,
+
+        def _score_text(scores: dict, key: str, default: str = "unknown") -> str:
+            value = scores.get(key, default)
+            return str(value or default)
+
+        def _score_float(scores: dict, key: str, default: float = 0.0) -> float:
+            try:
+                return float(scores.get(key, default) or default)
+            except (TypeError, ValueError):
+                return default
+
+        def _score_int(scores: dict, key: str, default: int = -1) -> int:
+            try:
+                return int(scores.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        records = []
+        for t in self._closed:
+            if not t.scores:
+                continue
+            scores = {**t.scores, "is_shadow": 1.0}
+            records.append(
+                TradeRecord(
+                    symbol=t.symbol or "shadow",
+                    direction=t.direction or "long",
+                    entry_price=t.entry_price,
+                    exit_price=t.exit_price,
+                    pnl_usd=t.pnl_usd,
+                    pnl_pct=t.pnl_pct,
+                    reason=t.exit_reason,
+                    # Tag shadow so ML can learn to discount simulator-distribution artifacts
+                    scores=scores,
+                    opened_at=t.opened_at,
+                    closed_at=t.closed_at,
+                    regime=t.regime or _score_text(scores, "regime", "unknown"),
+                    strategy_sleeve=_score_text(scores, "strategy_sleeve", "unknown"),
+                    exit_profile=_score_text(scores, "exit_profile", "unknown"),
+                    dispersion_value=_score_float(scores, "dispersion_value", 0.0),
+                    dispersion_state=_score_text(scores, "dispersion_state", "normal"),
+                    mfe_r=t.mfe_r,
+                    mae_r=t.mae_r,
+                    session=_score_text(scores, "session", "unknown"),
+                    hour_of_day=_score_int(scores, "hour_of_day", -1),
+                    day_of_week=_score_int(scores, "day_of_week", -1),
+                    asset=t.symbol.split('/')[0] if '/' in t.symbol else "unknown",
+                    sector=t.sector or _score_text(scores, "sector", "unknown"),
+                    market_risk_on_state=_score_text(scores, "market_risk_on_state", "unknown"),
+                    market_rotation_state=_score_text(scores, "market_rotation_state", "unknown"),
+                    market_btc_trend=_score_text(scores, "market_btc_trend", "unknown"),
+                    market_eth_btc_trend=_score_text(scores, "market_eth_btc_trend", "unknown"),
+                    market_btc_d_trend=_score_text(scores, "market_btc_d_trend", "unknown"),
+                    market_total_trend=_score_text(scores, "market_total_trend", "unknown"),
+                    market_context_confidence=_score_float(scores, "market_context_confidence", 0.0),
+                )
             )
-            for t in self._closed
-            if t.scores  # only pre-warm ML if we have feature data
-        ]
+        return records
 
     def metrics(self) -> ShadowMetrics:
         trades = self._closed

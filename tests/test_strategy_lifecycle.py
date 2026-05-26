@@ -35,6 +35,7 @@ def _trade(pnl_usd: float, closed_at: float, reason: str = "tp2") -> TradeRecord
         reason=reason,
         scores={
             "strategy_sleeve": "trend_following",
+            "setup_type": "trend_continuation",
             "session": "london",
             "volatility_bucket": "medium",
             "trend_bucket": "strong",
@@ -62,6 +63,29 @@ def test_lifecycle_promotes_healthy_cohort_to_active():
     cohort = report["cohorts"][0]
     assert cohort["status"] == "ACTIVE"
     assert report["recommendation"] == "TRADE"
+    assert report["primary_edge"]["key"] == cohort["key"]
+    assert report["primary_edge"]["status"] == "ACTIVE"
+    assert report["primary_edge"]["validated"] is True
+
+
+def test_lifecycle_does_not_promote_losing_cohort_as_primary_edge():
+    mgr = StrategyLifecycleManager(_cfg())
+    trades = [_trade(-1.0, i, reason="stop_loss") for i in range(6)]
+    report = mgr.build_report(trades)
+
+    assert report["recommendation"] == "PAPER_ONLY"
+    assert report["primary_edge"] is None
+
+
+def test_lifecycle_requires_research_sample_before_primary_edge():
+    mgr = StrategyLifecycleManager(_cfg())
+    report = mgr.build_report([_trade(2.0, 1)])
+
+    assert report["recommendation"] == "PAPER_ONLY"
+    assert report["primary_edge"] is None
+
+
+
 
 
 def test_lifecycle_blocks_unvalidated_live_cohort():
@@ -100,5 +124,95 @@ def test_lifecycle_can_be_disabled():
     )
     decision = mgr.assess_breakdown(bd, report, mode="paper", hour_utc=9)
     assert report["recommendation"] == "TRADE"
+    assert report.get("primary_edge") is None
     assert decision.allowed is True
     assert decision.reason == "lifecycle filter disabled"
+
+
+def test_lifecycle_isolates_setup_type_cohorts_from_generic_reversal_history():
+    mgr = StrategyLifecycleManager(_cfg())
+    generic_losses = [
+        TradeRecord(
+            symbol="SOL/USDT:USDT",
+            direction="short",
+            entry_price=100.0,
+            exit_price=101.0,
+            pnl_usd=-1.0,
+            pnl_pct=-1.0,
+            reason="stop_loss",
+            scores={
+                "strategy_sleeve": "reversal",
+                "setup_type": "sweep_reversal",
+                "sm_phase": "liquidity_sweep",
+                "session": "london",
+            },
+            opened_at=float(i),
+            closed_at=float(i + 1),
+            regime="distribution",
+            strategy_sleeve="reversal",
+            exit_profile="reversal",
+        )
+        for i in range(6)
+    ]
+    isolated_wins = [
+        TradeRecord(
+            symbol="SOL/USDT:USDT",
+            direction="short",
+            entry_price=100.0,
+            exit_price=98.0,
+            pnl_usd=2.0,
+            pnl_pct=2.0,
+            reason="tp2",
+            scores={
+                "strategy_sleeve": "reversal",
+                "setup_type": "liquidity_sweep_reversal",
+                "sm_phase": "liquidity_sweep",
+                "session": "london",
+            },
+            opened_at=float(20 + i),
+            closed_at=float(21 + i),
+            regime="distribution",
+            strategy_sleeve="reversal",
+            exit_profile="reversal",
+            tp1_hit=True,
+        )
+        for i in range(6)
+    ]
+
+    report = mgr.build_report(generic_losses + isolated_wins)
+    keys = {c["key"]: c for c in report["cohorts"]}
+
+    assert "liquidity_sweep_reversal|distribution|short" in keys
+    assert keys["liquidity_sweep_reversal|distribution|short"]["profit_factor"] == float("inf")
+    assert report["primary_edge"]["key"] == "liquidity_sweep_reversal|distribution|short"
+
+
+def test_lifecycle_matches_isolated_setup_breakdown_to_report():
+    cfg = _cfg()
+    cfg["lifecycle"]["small_live_min_trades"] = 5
+    cfg["lifecycle"]["active_min_trades"] = 10
+    mgr = StrategyLifecycleManager(cfg)
+    trades = []
+    for i in range(5):
+        t = _trade(2.0, float(i))
+        t.direction = "short"
+        t.regime = "distribution"
+        t.strategy_sleeve = "reversal"
+        t.scores["setup_type"] = "liquidity_sweep_reversal"
+        t.scores["sm_phase"] = "liquidity_sweep"
+        trades.append(t)
+    report = mgr.build_report(trades)
+    bd = SimpleNamespace(
+        symbol="SOL/USDT:USDT",
+        regime=SimpleNamespace(value="distribution"),
+        smart_money=SimpleNamespace(phase=SimpleNamespace(value="liquidity_sweep")),
+        strategy_sleeve="reversal",
+        setup_type="liquidity_sweep_reversal",
+        direction="short",
+    )
+
+    decision = mgr.assess_breakdown(bd, report, mode="live", hour_utc=9)
+
+    assert decision.cohort_key == "liquidity_sweep_reversal|distribution|short"
+    assert decision.allowed is True
+    assert decision.status == "SMALL_LIVE"

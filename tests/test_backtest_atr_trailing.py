@@ -24,6 +24,9 @@ can't quietly drop ATR plumbing again.
 """
 from __future__ import annotations
 
+import pandas as pd
+from types import SimpleNamespace
+
 from src.backtest.engine import BacktestEngine, BacktestTrade
 
 
@@ -149,3 +152,31 @@ def test_atr_trailing_stop_hit_closes_trade():
     assert closed is True
     assert trade.exit_reason == "trailing_stop"
     assert abs(trade.exit_price - 107.0) < 1e-9
+
+
+def test_backtest_score_bar_uses_runtime_scorer_snapshot_with_lower_tf():
+    seen = {}
+
+    class FakeScorer:
+        def score_many(self, snapshots):
+            seen.update(snapshots)
+            return [SimpleNamespace(symbol="BTC/USDT:USDT", total_score=72.0)]
+
+    eng = BacktestEngine.__new__(BacktestEngine)
+    eng._cfg = {"timeframes": {"primary": "1h", "higher": "4h", "lower": "15m", "entry": "5m"}}
+    eng._scorer = FakeScorer()
+
+    idx = pd.date_range("2026-01-01", periods=220, freq="h", tz="UTC")
+    primary = pd.DataFrame({"open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 100}, index=idx)
+    higher = primary.iloc[::4].copy()
+    lower_idx = pd.date_range("2026-01-01", periods=880, freq="15min", tz="UTC")
+    lower = pd.DataFrame({"open": 1, "high": 2, "low": 0.5, "close": 1.5, "volume": 100}, index=lower_idx)
+
+    bd = eng._score_bar("BTC/USDT:USDT", primary, higher, lower)
+
+    assert bd.total_score == 72.0
+    snap = seen["BTC/USDT:USDT"]
+    assert set(snap.candles) == {"1h", "4h", "15m"}
+    assert snap.last_price == 1.5
+    assert snap.ls_ratio == 1.0
+    assert snap.taker_buy_ratio == 0.5

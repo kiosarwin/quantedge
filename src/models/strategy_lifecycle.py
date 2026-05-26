@@ -19,12 +19,19 @@ import logging
 from dataclasses import dataclass
 from typing import Iterable
 
+from src.session_clock import active_market_session_key
+
 log = logging.getLogger(__name__)
 
 __all__ = ["StrategyLifecycleManager", "LifecycleDecision"]
 
 
 _STATUSES = ("RESEARCH", "PAPER_VALIDATION", "SMALL_LIVE", "ACTIVE", "DISABLED")
+_SETUP_ISOLATED_COHORTS = {
+    "mtf_price_action_continuation",
+    "vwap_pullback_continuation",
+    "liquidity_sweep_reversal",
+}
 
 
 # ----------------------------------------------------------------- decision
@@ -93,11 +100,13 @@ class StrategyLifecycleManager:
 
         # Sort cohorts by trade count desc for nicer display.
         cohorts.sort(key=lambda c: c["trades"], reverse=True)
+        primary_edge = self._select_primary_edge(cohorts)
 
         return {
             "cohorts": cohorts,
             "counts": counts,
             "recommendation": recommendation,
+            "primary_edge": primary_edge,
             "enabled": True,
         }
 
@@ -153,24 +162,47 @@ class StrategyLifecycleManager:
 
     # ------------------------------------------------------------- internals
 
+    @staticmethod
+    def _setup_type_from_trade(trade) -> str:
+        scores = getattr(trade, "scores", {}) or {}
+        setup_type = getattr(trade, "setup_type", "") or scores.get("setup_type", "")
+        if not setup_type:
+            passport = scores.get("setup_passport", {}) or {}
+            if isinstance(passport, dict):
+                setup_type = passport.get("setup_type", "")
+        return str(setup_type or "")
+
+    @staticmethod
+    def _setup_type_from_breakdown(breakdown) -> str:
+        setup_type = getattr(breakdown, "setup_type", "") or ""
+        passport = getattr(breakdown, "setup_passport", None)
+        if not setup_type and passport is not None:
+            setup_type = getattr(passport, "setup_type", "") or ""
+        return str(setup_type or "")
+
     def _cohort_key_from_trade(self, trade) -> str:
         sleeve = getattr(trade, "strategy_sleeve", "") or "unknown"
         regime = getattr(trade, "regime", "") or "unknown"
         scores = getattr(trade, "scores", {}) or {}
+        direction = getattr(trade, "direction", "") or "unknown"
+        setup_type = self._setup_type_from_trade(trade)
+        if setup_type in _SETUP_ISOLATED_COHORTS:
+            return f"{setup_type}|{regime}|{direction}"
         sm_phase = scores.get("sm_phase", "neutral") or "neutral"
         session = scores.get("session", "unknown") or "unknown"
-        direction = getattr(trade, "direction", "") or "unknown"
         return f"{sleeve}|{regime}|{sm_phase}|{session}|{direction}"
 
     def _cohort_key_from_breakdown(self, breakdown) -> str:
         sleeve = getattr(breakdown, "strategy_sleeve", "") or "unknown"
         regime_obj = getattr(breakdown, "regime", None)
         regime = getattr(regime_obj, "value", "") if regime_obj else "unknown"
+        direction = getattr(breakdown, "direction", "") or "unknown"
+        setup_type = self._setup_type_from_breakdown(breakdown)
+        if setup_type in _SETUP_ISOLATED_COHORTS:
+            return f"{setup_type}|{regime}|{direction}"
         sm_obj = getattr(breakdown, "smart_money", None)
         sm_phase = getattr(getattr(sm_obj, "phase", None), "value", "") if sm_obj else "neutral"
-        direction = getattr(breakdown, "direction", "") or "unknown"
-        # Session is unknown at scoring time — main.py annotates trades when they close.
-        session = "unknown"
+        session = getattr(breakdown, "session", "") or active_market_session_key()
         return f"{sleeve}|{regime}|{sm_phase}|{session}|{direction}"
 
     def _evaluate_cohort(self, key: str, trades: list) -> dict:
@@ -230,6 +262,59 @@ class StrategyLifecycleManager:
             "max_drawdown_usd": max_dd,
             "outlier_share": outlier_share,
             "status": status,
+        }
+
+    def _has_positive_edge(self, cohort: dict) -> bool:
+        if cohort.get("status") == "DISABLED":
+            return False
+        if int(cohort.get("trades", 0) or 0) < self._params["research_min_trades"]:
+            return False
+        pf = float(cohort.get("profit_factor", 0.0) or 0.0)
+        return (
+            float(cohort.get("expectancy_usd", 0.0) or 0.0) >= self._params["min_expectancy_usd"]
+            and pf >= self._params["min_profit_factor"]
+            and float(cohort.get("win_rate", 0.0) or 0.0) >= self._params["min_win_rate"]
+            and float(cohort.get("stop_hit_rate", 0.0) or 0.0) <= self._params["max_stop_hit_rate"]
+            and float(cohort.get("outlier_share", 0.0) or 0.0) <= self._params["max_outlier_share"]
+        )
+
+    def _select_primary_edge(self, cohorts: list[dict]) -> dict | None:
+        candidates = [c for c in cohorts if self._has_positive_edge(c)]
+        if not candidates:
+            return None
+
+        def _rank(c: dict) -> tuple:
+            status = str(c.get("status", "RESEARCH") or "RESEARCH")
+            status_rank = {
+                "ACTIVE": 4,
+                "SMALL_LIVE": 3,
+                "PAPER_VALIDATION": 2,
+                "RESEARCH": 1,
+            }.get(status, 0)
+            pf = float(c.get("profit_factor", 0.0) or 0.0)
+            if pf == float("inf"):
+                pf = 99.0
+            return (
+                status_rank,
+                float(c.get("expectancy_usd", 0.0) or 0.0),
+                min(pf, 99.0),
+                float(c.get("win_rate", 0.0) or 0.0),
+                int(c.get("trades", 0) or 0),
+            )
+
+        best = max(candidates, key=_rank)
+        status = str(best.get("status", "RESEARCH") or "RESEARCH")
+        return {
+            "key": best["key"],
+            "status": status,
+            "validated": status in {"SMALL_LIVE", "ACTIVE"},
+            "trades": int(best.get("trades", 0) or 0),
+            "win_rate": float(best.get("win_rate", 0.0) or 0.0),
+            "profit_factor": float(best.get("profit_factor", 0.0) or 0.0),
+            "expectancy_usd": float(best.get("expectancy_usd", 0.0) or 0.0),
+            "reason": "best validated cohort"
+            if status in {"SMALL_LIVE", "ACTIVE"}
+            else "best bootstrap candidate",
         }
 
 

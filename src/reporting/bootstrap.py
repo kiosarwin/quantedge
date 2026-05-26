@@ -145,6 +145,7 @@ def build_bootstrap_audit_report(
     cohort_report = lifecycle_report or {}
     cohort_counts = dict(cohort_report.get("counts", {}))
     cohort_recommendation = str(cohort_report.get("recommendation", "PAPER_ONLY"))
+    primary_edge = cohort_report.get("primary_edge")
 
     edge_total_samples = int(edge_memory.total_samples()) if edge_memory else 0
     edge_rows_data = []
@@ -167,6 +168,7 @@ def build_bootstrap_audit_report(
         "session_matrix": session_matrix,
         "cohort_counts": cohort_counts,
         "cohort_recommendation": cohort_recommendation,
+        "primary_edge": primary_edge,
         "cohort_rows": cohort_rows[:5],
         "edge_total_samples": edge_total_samples,
         "edge_rows": edge_rows_data,
@@ -183,6 +185,7 @@ def format_bootstrap_audit_lines(report: dict) -> list[str]:
     recent = report.get("recent", {})
     cohort_counts = report.get("cohort_counts", {})
     cohort_rows = report.get("cohort_rows", [])
+    primary_edge = report.get("primary_edge") or None
     edge_total_samples = int(report.get("edge_total_samples", 0))
     edge_rows = report.get("edge_rows", [])
     attribution = report.get("attribution", {})
@@ -228,6 +231,20 @@ def format_bootstrap_audit_lines(report: dict) -> list[str]:
         + " ".join(f"`{k}:{v}`" for k, v in sorted(cohort_counts.items()))
         + f" | Rec `{report.get('cohort_recommendation', 'PAPER_ONLY')}`"
     )
+    if primary_edge:
+        pf = _fmt_pf(primary_edge.get("profit_factor", 0.0))
+        marker = "VALIDATED" if primary_edge.get("validated") else "CANDIDATE"
+        lines.append(
+            "Primary edge: "
+            f"`{marker}` `{primary_edge.get('key', 'unknown')}` "
+            f"status `{primary_edge.get('status', 'unknown')}` "
+            f"n `{primary_edge.get('trades', 0)}` "
+            f"WR `{primary_edge.get('win_rate', 0.0):.1%}` "
+            f"PF `{pf}` "
+            f"Exp `${primary_edge.get('expectancy_usd', 0.0):+.2f}`"
+        )
+    else:
+        lines.append("Primary edge: `_none yet_`")
     for row in cohort_rows[:2]:
         lines.append(
             "  Cohort "
@@ -260,6 +277,17 @@ def format_bootstrap_audit_lines(report: dict) -> list[str]:
                 f"WR `{row['win_rate']:.0%}` "
                 f"PF `{_fmt_pf(row['profit_factor'])}` "
                 f"PnL `${row['net_pnl_usd']:+.2f}`"
+            )
+    market_rows = attribution.get("by_market_context", [])[:2]
+    if market_rows:
+        lines.append("Attribution market:")
+        for row in market_rows:
+            lines.append(
+                "  "
+                f"`{row['key']}` "
+                f"n `{row['trades']}` "
+                f"WR `{row['win_rate']:.0%}` "
+                f"PF `{_fmt_pf(row['profit_factor'])}`"
             )
     regime_side_rows = attribution.get("by_regime_side", [])[:2]
     if regime_side_rows:

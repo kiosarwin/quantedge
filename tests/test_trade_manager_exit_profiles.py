@@ -10,6 +10,7 @@ class _FakeExecutor:
     def __init__(self):
         self.take_profit_calls = []
         self.move_stop_calls = []
+        self.close_calls = []
 
     async def open_position(self, setup):
         return {"id": "entry-1", "price": setup.entry_price}
@@ -40,6 +41,7 @@ class _FakeExecutor:
         return None
 
     async def close_position_market(self, symbol, direction, size_contracts):
+        self.close_calls.append((symbol, direction, size_contracts))
         return None
 
 
@@ -47,7 +49,7 @@ class _FakeRisk:
     def can_open_trade(self):
         return True, "ok"
 
-    def check_trade_exposure(self, symbol, direction, risk_pct):
+    def check_trade_exposure(self, symbol, direction, risk_pct, sector="unknown"):
         return True, "ok"
 
     def on_trade_opened(self, **kwargs):
@@ -362,3 +364,204 @@ def test_trade_manager_ignores_invalid_zero_prices(monkeypatch, tmp_path):
     asyncio.run(manager.monitor_all({"ETH/USDT:USDT": 0.0}))
     assert "ETH/USDT:USDT" in manager.open_symbols
     assert manager.get_floating_pnl({"ETH/USDT:USDT": 0.0}) == []
+
+
+def test_trade_manager_persists_setup_passport(monkeypatch, tmp_path):
+    cfg = {"exit": {}, "ev_model": {}}
+    executor = _FakeExecutor()
+    risk = _FakeRisk()
+    state_path = tmp_path / "open_trades.json"
+    monkeypatch.setattr(TradeManager, "STATE_PATH", state_path)
+    manager = TradeManager(client=object(), executor=executor, risk=risk, cfg=cfg)
+
+    passport = {
+        "decision": "eligible",
+        "setup_type": "trend_continuation",
+        "sleeve": "trend_following",
+        "expected_path": "impulse_continuation",
+        "invalidation": "breaks_recent_structure_or_stop",
+        "alignment": 0.66,
+    }
+    setup = TradeSetup(
+        symbol="BTC/USDT:USDT",
+        direction="long",
+        entry_price=100.0,
+        stop_loss=95.0,
+        tp1=110.0,
+        tp2=120.0,
+        tp3=130.0,
+        size_usd=100.0,
+        size_contracts=1.0,
+        leverage=5,
+        r_distance=5.0,
+        strategy_sleeve="trend_following",
+        atr=2.0,
+        risk_pct=1.0,
+        setup_passport=passport,
+    )
+
+    trade = asyncio.run(manager.open(setup))
+    assert trade is not None
+
+    import json
+    payload = json.loads(state_path.read_text())
+    saved = payload["trades"][0]["setup"]["setup_passport"]
+    assert saved["setup_type"] == "trend_continuation"
+    assert saved["expected_path"] == "impulse_continuation"
+
+
+def test_trade_manager_closes_failed_passport_breakout(monkeypatch, tmp_path):
+    cfg = {
+        "exit": {
+            "passport_monitor": {
+                "enabled": True,
+                "min_age_s": 0.0,
+                "breakout_failure_mae_r": 0.45,
+                "breakout_mfe_ceiling_r": 0.25,
+            },
+            "early_cut": {"enabled": False},
+        },
+        "ev_model": {},
+    }
+    executor = _FakeExecutor()
+    risk = _FakeRisk()
+    monkeypatch.setattr(TradeManager, "STATE_PATH", tmp_path / "open_trades.json")
+    manager = TradeManager(client=object(), executor=executor, risk=risk, cfg=cfg)
+
+    setup = TradeSetup(
+        symbol="SOL/USDT:USDT",
+        direction="long",
+        entry_price=100.0,
+        stop_loss=90.0,
+        tp1=115.0,
+        tp2=125.0,
+        tp3=140.0,
+        size_usd=100.0,
+        size_contracts=1.0,
+        leverage=5,
+        r_distance=10.0,
+        strategy_sleeve="compression_breakout",
+        atr=4.0,
+        risk_pct=1.0,
+        setup_passport={
+            "decision": "eligible",
+            "setup_type": "compression_breakout",
+            "expected_path": "range_expansion",
+            "invalidation": "failed_breakout_reenters_range",
+        },
+    )
+
+    trade = asyncio.run(manager.open(setup))
+    assert trade is not None
+
+    # 0.5R adverse, no favourable movement: breakout contract failed.
+    asyncio.run(manager._check_exits(trade, 95.0))
+
+    assert "SOL/USDT:USDT" not in manager.open_symbols
+    assert trade.exit_price == pytest.approx(95.0)
+    assert executor.close_calls == [("SOL/USDT:USDT", "long", pytest.approx(1.0))]
+
+
+def test_trade_manager_closes_failed_experimental_continuation_passport(monkeypatch, tmp_path):
+    cfg = {
+        "exit": {
+            "passport_monitor": {
+                "enabled": True,
+                "min_age_s": 0.0,
+                "experimental_continuation_failure_mae_r": 0.45,
+                "experimental_continuation_mfe_ceiling_r": 0.35,
+            },
+            "early_cut": {"enabled": False},
+        },
+        "ev_model": {},
+    }
+    executor = _FakeExecutor()
+    risk = _FakeRisk()
+    monkeypatch.setattr(TradeManager, "STATE_PATH", tmp_path / "open_trades.json")
+    manager = TradeManager(client=object(), executor=executor, risk=risk, cfg=cfg)
+
+    setup = TradeSetup(
+        symbol="BCH/USDT:USDT",
+        direction="short",
+        entry_price=350.0,
+        stop_loss=355.0,
+        tp1=340.0,
+        tp2=332.5,
+        tp3=325.0,
+        size_usd=100.0,
+        size_contracts=1.0,
+        leverage=5,
+        r_distance=5.0,
+        strategy_sleeve="trend_following",
+        atr=2.0,
+        risk_pct=1.0,
+        setup_passport={
+            "decision": "eligible",
+            "setup_type": "mtf_price_action_continuation",
+            "expected_path": "mtf_impulse_continuation",
+            "invalidation": "breaks_pullback_structure",
+        },
+    )
+
+    trade = asyncio.run(manager.open(setup))
+    assert trade is not None
+
+    # Short trade: price rallies 0.5R adverse before any meaningful follow-through.
+    asyncio.run(manager._check_exits(trade, 352.5))
+
+    assert "BCH/USDT:USDT" not in manager.open_symbols
+    assert trade.exit_price == pytest.approx(352.5)
+    assert executor.close_calls == [("BCH/USDT:USDT", "short", pytest.approx(1.0))]
+
+
+def test_trade_manager_keeps_experimental_continuation_after_meaningful_mfe(monkeypatch, tmp_path):
+    cfg = {
+        "exit": {
+            "passport_monitor": {
+                "enabled": True,
+                "min_age_s": 0.0,
+                "experimental_continuation_failure_mae_r": 0.45,
+                "experimental_continuation_mfe_ceiling_r": 0.35,
+            },
+            "early_cut": {"enabled": False},
+        },
+        "ev_model": {},
+    }
+    executor = _FakeExecutor()
+    risk = _FakeRisk()
+    monkeypatch.setattr(TradeManager, "STATE_PATH", tmp_path / "open_trades.json")
+    manager = TradeManager(client=object(), executor=executor, risk=risk, cfg=cfg)
+
+    setup = TradeSetup(
+        symbol="BCH/USDT:USDT",
+        direction="short",
+        entry_price=350.0,
+        stop_loss=355.0,
+        tp1=340.0,
+        tp2=332.5,
+        tp3=325.0,
+        size_usd=100.0,
+        size_contracts=1.0,
+        leverage=5,
+        r_distance=5.0,
+        strategy_sleeve="trend_following",
+        atr=2.0,
+        risk_pct=1.0,
+        setup_passport={
+            "decision": "eligible",
+            "setup_type": "vwap_pullback_continuation",
+            "expected_path": "vwap_reclaim_continuation",
+            "invalidation": "loses_vwap_and_pullback_extreme",
+        },
+    )
+
+    trade = asyncio.run(manager.open(setup))
+    assert trade is not None
+
+    asyncio.run(manager._check_exits(trade, 348.0))  # 0.4R favourable first
+    asyncio.run(manager._check_exits(trade, 352.5))  # then 0.5R adverse
+
+    assert "BCH/USDT:USDT" in manager.open_symbols
+    assert trade.mfe_r == pytest.approx(0.4)
+    assert trade.mae_r == pytest.approx(0.5)
+    assert executor.close_calls == []

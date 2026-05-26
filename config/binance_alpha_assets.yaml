@@ -1,0 +1,21 @@
+# Binance Alpha / high-volatility alpha-list assets that need stricter ATR geometry guards.
+# Symbols are base assets, not full perp symbols. Example: ESPORTS for ESPORTS/USDT:USDT.
+assets:
+  - 1000PEPE
+  - AGT
+  - B2
+  - BEAT
+  - BILL
+  - BSB
+  - ESPORTS
+  - GRASS
+  - GUA
+  - HANA
+  - IN
+  - LAB
+  - PLAY
+  - Q
+  - UB
+  - USELESS
+  - VVV
+  - XAN

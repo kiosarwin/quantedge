@@ -5,7 +5,7 @@
 
 exchange:
   name: binance_futures
-  testnet: true                     # Set false only when going live
+  testnet: false                    # Paper mode uses live public market data; live orders still require mode=live
   api_key: ""                      # Set via .env: BINANCE_API_KEY
   api_secret: ""                   # Set via .env: BINANCE_API_SECRET
   recv_window: 10000
@@ -15,19 +15,19 @@ trading:
   mode: paper                      # paper | live | backtest
   exploration_mode: false          # false = paper validates production gates instead of taking exploratory losses
   base_currency: USDT
-  paper_starting_equity: 70        # Reset fresh paper run from $70
-  paper_state_reset_token: "fresh_70_2026_05_21"
+  paper_starting_equity: 1000      # Reset fresh paper run from $1000
+  paper_state_reset_token: "sample_collection_1000_2026_05_25"
   # ── AGGRESSIVE-EDGE TUNING (2026-05) ────────────────────────────────────
-  # Bot now imports cleanly; we widen sampling so the EV/lifecycle layers
-  # actually see signals.  The regime + smart-money + EV gates remain
-  # un-relaxed — those are what protect the edge.
+  # Bot now imports cleanly; we widen sampling so lifecycle can collect samples.
+  # Regime + smart-money gates remain active; EV is observed but not gating
+  # until a durable edge is found.
   min_score_threshold: 42          # Paper sample collection floor (-3 from previous 45)
   max_open_trades: 2               # Two concurrent base; paper override widens further
   top_pairs_to_trade: 2
-  scan_pool_size: 35               # Wider opportunity funnel (+10 from 25)
+  scan_pool_size: 45               # Wider opportunity funnel; config-only universe expansion
   scan_interval_seconds: 60
   candle_refresh_seconds: 30
-  signal_confirmation_scans: 1     # Faster reaction; paper relies on EV gate for quality
+  signal_confirmation_scans: 1     # Faster reaction for paper edge discovery
   signal_max_age_seconds: 300      # expire signal if not confirmed within 5 min
   regime_thresholds:               # Per-regime override of min_score_threshold
     trending_expansion: 50         # Was 52 — high-quality trending setups should not be choked
@@ -37,6 +37,26 @@ trading:
 # ── Paper Validation Throughput ──────────────────────────────────────────────
 # Purpose: collect enough samples in paper mode without weakening live-mode
 # guardrails. This is a controlled relaxation layer, not a live trading policy.
+position_rotation:
+  enabled: true
+  max_rotations_per_cycle: 1
+  max_rotations_per_day: 3
+  min_candidate_score: 72.0
+  min_score_advantage: 14.0
+  min_candidate_quality: 58.0
+  min_candidate_p_win: 0.38
+  min_candidate_ev_net_pct: -0.75
+  positive_ev_probe_min_candidate_score: 35.0
+  positive_ev_probe_min_score_advantage: 0.0
+  positive_ev_probe_min_candidate_quality: 0.0
+  min_victim_age_s: 7200
+  protect_after_tp1: true
+  protect_mfe_r: 0.80
+  protect_unrealized_gain_r: 0.30
+  protect_unrealized_gain_pct: 3.0
+  protect_winner_min_age_s: 21600
+  max_victim_adverse_r: 0.90
+
 paper_validation:
   enabled: true
   allowed_directions:
@@ -58,8 +78,8 @@ paper_validation:
     - compression_breakout
   max_open_trades_override: 5
   top_pairs_to_trade_override: 5
-  threshold_relaxation: 7.0
-  min_score_floor: 42.0
+  threshold_relaxation: 15.0
+  min_score_floor: 35.0
   ev_hard_gate_min_trades: 40     # After this, EV relax is disabled; only positive EV passes
   ml_hard_gate_min_trades: 999
   ev_relax_score_buffer: 3.0
@@ -68,6 +88,44 @@ paper_validation:
   high_conviction_score_trigger: 64.0
   high_conviction_ev_max_deficit_pct: 0.50
   high_conviction_min_total_scale: 0.30
+  stress_tighten_daily_loss_pct: -3.0       # On bad paper days, stop EV-relaxing negative expectancy
+  stress_tighten_consecutive_losses: 3      # Loss-streak fallback for the same tightening
+  stress_min_ev_net_pct: 0.0                # During stress, relaxed samples must be non-negative EV
+  loss_streak_guard_enabled: true           # Paper-only: no halt/cooldown, but wait for cleaner setups when losing
+  loss_streak_guard_daily_loss_pct: -2.0
+  loss_streak_guard_consecutive_losses: 2
+  loss_streak_guard_min_score_buffer: 8.0
+  loss_streak_guard_min_setup_quality: 68.0
+  loss_streak_guard_require_ev: true
+  loss_streak_guard_min_p_win: 0.42
+  loss_streak_guard_min_ev_net_pct: 0.0
+  loss_streak_guard_max_total_scale: 0.35   # Do not increase size while losing; collect smaller samples only
+  experimental_setup_stress_block_enabled: true # Pause unproven setup cohorts on bad paper days
+  experimental_setup_stress_block_daily_loss_pct: -3.0
+  experimental_setup_stress_block_consecutive_losses: 3
+  experimental_setup_stress_block_setup_types:
+    - mtf_price_action_continuation
+    - vwap_pullback_continuation
+    - liquidity_sweep_reversal
+  ev_observation_floor_enabled: true        # Even with EV gate off, block very low-probability deep-negative EV samples
+  ev_observation_min_p_win: 0.30            # Floor from IN/USDT postmortem: avoid spending risk on <30% p_win ideas
+  ev_observation_max_deficit_pct: 0.75      # Block only when net EV deficit is materially worse than -0.75%
+  positive_ev_probe_enabled: true          # Paper-only: sample strong positive-EV liquidity-sweep shorts below score floor
+  positive_ev_probe_min_ev_net_pct: 0.50    # Net EV must be meaningfully positive after costs
+  positive_ev_probe_min_p_win: 0.50         # Positive-EV sweep probes may start at break-even probability
+  positive_ev_probe_min_score: 30.0         # Never take zero-score/regime-mismatch probes
+  positive_ev_probe_max_score_deficit: 12.0 # Score may be below threshold only within this bounded gap
+  positive_ev_probe_min_sm_score: 75.0      # Require strong smart-money evidence
+  positive_ev_probe_allowed_directions:
+    - short
+  positive_ev_probe_allowed_regimes:
+    - trending_expansion
+    - distribution
+  positive_ev_probe_allowed_sm_phases:
+    - liquidity_sweep
+  positive_ev_probe_allowed_sleeves:
+    - neutral
+    - reversal
   high_conviction_allowed_regimes:
     - trending_expansion
     - accumulation_compression
@@ -95,18 +153,20 @@ risk:
   # hard floor so bursts of losses get arrested fast.
   risk_per_trade_pct: 1.5            # UPGRADED from 1.25 — more aggressive on validated edge
   max_risk_per_trade_pct: 2.5        # UPGRADED from 1.75 — Kelly can express up to 2.5%
-  daily_loss_cap_pct: 5.0          # Stop trading if down 5% in a day
+  daily_loss_cap_pct: 5.0          # Paper sample collection cap; cooldown/streak halt disabled below
   weekly_loss_cap_pct: 0.0         # Disabled in paper so valid samples are not frozen
   max_drawdown_pct: 20.0           # TIGHTENED from 25% — earlier brake protects equity curve
   min_rr_ratio: 1.8                # LOWERED from 2.0 — allows high WR setups with 1.8R min
   max_leverage: 12                 # UPGRADED: allow up to 12x on high-conviction
   default_leverage: 6              # UPGRADED from 5x
   stop_loss_atr_multiplier: 1.3    # TIGHTENED from 1.5 — tighter SL = smaller R, better RR
+  max_stop_distance_pct: 50.0       # Reject abnormal ATR stops/negative short TPs on microcaps
   min_notional_usd: 5.0            # Binance Futures minimum order notional
-  min_risk_usd: 0.75               # Paper-account floor
-  cooldown_after_loss_streak: 2    # After N consecutive losses, pause briefly
-  cooldown_minutes: 20             # Was 30 — quicker recovery on small streaks
+  min_risk_usd: 0.50               # Paper-account floor; lets Brain/FundManager scale-down matter on $70 equity
+  cooldown_after_loss_streak: 0    # Disabled by request: collect paper samples without streak cooldown
+  cooldown_minutes: 0              # Disabled by request: no cooldown during sample collection
   max_symbol_risk_pct: 2.5         # Match max_risk_per_trade so single-symbol bets are not artificially capped
+  max_sector_risk_pct: 2.5         # Sector limit: avoid correlated clusters (e.g. 3 AI coins at once)
   max_direction_risk_pct: 5.50     # Allow heavier directional concentration when conviction is high
   # ── Correlation cap ────────────────────────────────────────────────────
   # Block opening a new trade that is highly correlated (and direction-
@@ -141,6 +201,21 @@ exit:
     mae_r_threshold: 0.55         # TIGHTER from 0.65 — cut at 55% of risk distance
     mfe_r_ceiling: 0.15           # TIGHTER from 0.20 — trade never showed life
 
+  # ── Passport contract monitor ───────────────────────────────────────
+  # Entry passport is the setup contract.  Before TP1, close paper/live
+  # positions that spend too much R without following their expected path.
+  passport_monitor:
+    enabled: true
+    min_age_s: 600
+    trend_failure_mae_r: 0.70
+    trend_mfe_ceiling_r: 0.20
+    experimental_continuation_failure_mae_r: 0.50 # MTF/VWAP cohorts must follow through faster than generic trend
+    experimental_continuation_mfe_ceiling_r: 0.35
+    breakout_failure_mae_r: 0.45
+    breakout_mfe_ceiling_r: 0.25
+    reversal_failure_mae_r: 0.50
+    reversal_mfe_ceiling_r: 0.20
+
 exit_profiles:
   trend_following:
     tp1_r_multiple: 2.0                  # UPGRADED from 1.8 — trend trades should aim higher
@@ -174,7 +249,7 @@ exit_profiles:
     max_hold_duration_s: 86400
 
 filters:
-  min_24h_volume_usdt: 100_000_000
+  min_24h_volume_usdt: 50_000_000   # Expanded universe; keep liquidity floor, no trading-logic change
   min_price_usdt: 0.001
   blacklisted_pairs:
     - USDCUSDT
@@ -220,6 +295,26 @@ order_book:
   wall_size_multiplier: 5.0
   absorption_volume_mult: 3.0
 
+market_context:
+  enabled: true
+  ttl_seconds: 300
+  lookback_bars: 48
+  trend_threshold_pct: 1.0
+  btc_symbol: "BTC/USDT:USDT"
+  eth_symbol: "ETH/USDT:USDT"
+  btc_d_symbol: ""      # Optional external/index symbol when supported
+  total_symbol: ""      # Optional external/index symbol when supported
+
+time_series:
+  enabled: true
+  lookback_bars: 96        # Causal return window for stationarity/volatility diagnostics
+  min_returns: 30
+  ewma_lambda: 0.94        # RiskMetrics-style EWMA volatility; lighter than runtime GARCH
+  shock_z_threshold: 2.8
+  vol_ratio_threshold: 1.65
+  markov_window: 20        # Rolling return state window for bull/bear/sideways transitions
+  markov_threshold_pct: 2.0
+
 scoring:
   weights:
     trend_strength: 20
@@ -236,6 +331,37 @@ strategy:
   trend_min_score: 58              # LOWERED from 60 — let quality setups through
   trend_min_structure: 52          # LOWERED from 55
   trend_long_only: false             # UPGRADED: both directions active per momentum research
+  trend_require_participation: true  # With EV gate off, trend needs volume + OI confirmation
+  trend_min_alignment: 0.54          # Directional microstructure passport floor
+  breakout_min_alignment: 0.57       # Compression breakouts need cleaner flow than trends
+  reversal_min_alignment: 0.45       # Sweeps can be contrarian, but cannot contradict structure
+  mtf_price_action_continuation:
+    enabled: true                    # Restored: HTF trend + pullback hold + primary continuation break
+    min_quality_score: 72.0
+    require_participation: true      # Experimental cohort: require volume + OI confirmation
+    block_high_dispersion: true      # Avoid continuation entries when cross-sectional momentum is chaotic
+    breakout_lookback: 20
+    pullback_lookback: 8
+  vwap_pullback_continuation:
+    enabled: true                    # Pro-style intraday trend pullback: VWAP reclaim/resume with volume
+    min_quality_score: 74.0
+    require_participation: true      # Needs futures participation, not price-only VWAP touch
+    block_high_dispersion: true
+    vwap_period: 20
+    pullback_lookback: 6
+    min_volume_ratio: 1.15
+    max_atr_distance: 0.85
+  liquidity_sweep_reversal:
+    enabled: true                    # SMC/ICT-style liquidity raid + reclaim close, isolated from generic reversal
+    min_quality_score: 78.0
+    require_participation: true
+    block_high_dispersion: true
+    lookback_bars: 24
+    confirm_bars: 2
+    pierce_min_pct: 0.0015
+    reclaim_buffer_atr: 0.10
+    min_volume_ratio: 1.20
+    max_volatility: 80
   enable_compression_breakout: true
   compression_min_structure: 55       # LOWERED from 58
   reversal_max_volatility: 80         # INCREASED from 75 — reversals can happen in vol
@@ -294,16 +420,58 @@ logging:
 telegram:
   token: ""         # Set via .env: TELEGRAM_TOKEN
   chat_id: ""       # Set via .env: TELEGRAM_CHAT_ID
+  parse_mode: ""    # Plain text by default; set Markdown only after escaping dynamic labels
   heartbeat_interval_minutes: 1   # Short account-summary heartbeat every minute
   cycle_report_interval_minutes: 5 # Detailed Jim Simons fund-manager report every 5 minutes
   equity_graph_interval_minutes: 60 # Separate PNG balance/equity graph cadence
   bootstrap_audit_interval_hours: 12 # Separate bootstrap audit report cadence (0 = off)
+  crypto_news_interval_minutes: 0  # Temporarily disabled to reduce server/network/LLM load (0 = off)
+  crypto_news_limit: 5             # Number of narratives in the brief
+  crypto_news_timeout_seconds: 8.0 # Total timeout per RSS source fetch
+  crypto_news_llm_enabled: true    # Uses a public LLM API when a provider key is present; otherwise falls back to rules
+  crypto_news_llm_provider: "auto" # auto|gemini|openrouter|groq|huggingface|openai|custom
+  crypto_news_llm_timeout_seconds: 12.0
+  crypto_news_llm_api_key_env: ""  # custom provider only; prefer env vars, never commit keys
+  crypto_news_llm_api_url: ""      # custom provider only; OpenAI-compatible /chat/completions URL
+  crypto_news_llm_model: ""        # custom provider only
+  crypto_news_llm_providers:
+    gemini:
+      api_url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+      model: "gemini-2.5-flash"
+      api_key_env:
+        - "GEMINI_API_KEY"
+        - "GOOGLE_API_KEY"
+    openrouter:
+      api_url: "https://openrouter.ai/api/v1/chat/completions"
+      model: "openrouter/free"
+      api_key_env:
+        - "OPENROUTER_API_KEY"
+    groq:
+      api_url: "https://api.groq.com/openai/v1/chat/completions"
+      model: "llama-3.3-70b-versatile"
+      api_key_env:
+        - "GROQ_API_KEY"
+    huggingface:
+      api_url: "https://router.huggingface.co/v1/chat/completions"
+      model: "openai/gpt-oss-120b"
+      api_key_env:
+        - "HF_TOKEN"
+        - "HUGGINGFACEHUB_API_TOKEN"
+    openai:
+      api_url: "https://api.openai.com/v1/chat/completions"
+      model: "gpt-4.1-mini"
+      api_key_env:
+        - "OPENAI_API_KEY"
+  crypto_news_feeds:
+    - "https://www.coindesk.com/arc/outboundfeeds/rss/"
+    - "https://cointelegraph.com/rss"
+    - "https://decrypt.co/feed"
   pnl_update_interval_minutes: 1  # Floating P&L update interval (0 = off)
 
 safety:
   pause_on_extreme_volatility: true
   extreme_vol_atr_multiplier: 3.0
-  max_consecutive_losses: 0              # Disable hard streak stop in paper; rely on core strategy + sizing
+  max_consecutive_losses: 0              # Disabled by request: no hard streak halt during paper sample collection
   api_retry_attempts: 3
   api_retry_delay_seconds: 5
   # Hang-storm protection (added 2026-05-22). Two-layer timeout on every
@@ -312,6 +480,8 @@ safety:
   # TimeoutError before asyncio cancels the coroutine.
   api_http_timeout_seconds: 20.0         # ccxt -> aiohttp ClientTimeout(total)
   api_call_timeout_seconds: 30.0         # asyncio.wait_for ceiling per call
+  market_data_snapshot_concurrency: 8    # Bound symbol-level data fanout; prevents OHLCV hang-storms
+  market_data_snapshot_timeout_seconds: 25.0 # Drop slow symbols and keep the scan cycle moving
   heartbeat_interval_seconds: 30
   auto_live_on_readiness: false          # Manual promotion only after audited forward results
   min_live_balance_usd: 10.0             # Abort live transition if balance below this
@@ -335,23 +505,17 @@ safety:
 # ── Cohort Edge Policy ───────────────────────────────────────────────────────
 # Blocks setup families that already show negative expectancy in closed trades.
 edge_policy:
-  enabled: false
+  enabled: true
   lookback_trades: 80
-  min_cohort_trades: 2
-  min_symbol_trades: 3
-  min_sm_phase_trades: 4
-  min_regime_sm_direction_trades: 4
-  min_reversal_cohort_trades: 4
-  block_winrate_below: 0.35
-  block_profit_factor_below: 0.80
-  support_winrate_at_least: 0.55
-  support_profit_factor_at_least: 1.20
-  max_support_boost: 1.15
-  block_bad_symbols: true
+  max_recent_pair_losses: 3
+  pair_history_window: 6
+  max_recent_sector_losses: 2      # Tighter sector lock: 2 losses in a sector stops new entries
+  sector_history_window: 5
   long_only: false
   allowed_regimes:
     - trending_expansion
     - distribution
+    - accumulation_compression
   allowed_sm_phases:
     - neutral
     - trending
@@ -361,11 +525,15 @@ edge_policy:
   allowed_strategy_sleeves:
     - trend_following
     - reversal
-  min_trend_strength: 65.0
-  min_volume_confirmation: 25.0
-  min_reversal_volume_confirmation: 25.0
-  max_volatility_score: 35.0
-  max_reversal_volatility_score: 100.0
+    - compression_breakout
+  attribution:
+    min_trades: 6
+    block_below_pf: 0.85
+    block_below_wr: 0.35
+    relief_above_pf: 1.30
+    relief_above_wr: 0.55
+    max_threshold_relief: 5.0
+    max_ranking_bonus: 4.0
 
 # ── Strategy Lifecycle / Cohort Health ───────────────────────────────────────
 # Each cohort graduates: RESEARCH -> PAPER_VALIDATION -> SMALL_LIVE -> ACTIVE.
@@ -419,13 +587,20 @@ edge_detector:
 
 # ── Probabilistic EV Model ───────────────────────────────────────────────────
 ev_model:
+  gate_enabled: false                     # Observe EV only; scans are broadly negative so do not hard-block admission yet
+  statistical_gate_enabled: true          # Require conservative EV lower-bound to stay positive before admission
+  confidence_z: 1.0                       # One-sided lower bound; roughly 84% conservative p(win) estimate
+  payoff_haircut: 0.85                    # Haircut realised avg win before gate math
+  loss_inflation: 1.10                    # Inflate realised avg loss before gate math
+  cost_buffer_pct: 0.05                   # Extra execution/model-error buffer in EV percent
+  min_conservative_ev_pct: 0.0            # Conservative EV must be non-negative after all buffers
   taker_fee_pct: 0.04                   # Binance futures taker fee %
   maker_fee_pct: 0.02                   # Binance futures maker fee %
   slippage_pct: 0.10                    # Expected slippage per leg % (Binance futures realistic)
-  min_ev_pct: 0.03                      # LOWERED from 0.05 — 3bp positive EV is real edge
-  min_p_win: 0.40                       # LOWERED from 0.42 — allow asymmetric payoff setups (low WR high RR)
+  min_ev_pct: 0.03                      # Point-estimate EV still must clear 3bp net edge
+  min_p_win: 0.40                       # Allow asymmetric payoff setups only after conservative EV confirms
   min_confidence: 0.50                  # LOWERED from 0.55 — faster data collection
-  min_trades_for_ev: 15                 # LOWERED from 20 — adapt faster
+  min_trades_for_ev: 20                 # Minimum matched setup samples before conservative EV can hard-pass
   prior_win_rate: 0.52                  # LOWERED from 0.55 — less optimistic prior
   prior_avg_win_pct: 2.8                # UPGRADED from 2.5 — targeting higher TP multiples
   prior_avg_loss_pct: 1.0               # Prior avg loss % of equity
@@ -470,3 +645,13 @@ execution:
 shadow:
   enabled: true                    # Runs ghost trades to accelerate ML training data
   report_interval_trades: 10       # Print shadow report every N closed trades
+
+# -- Trading Brain Journal -----------------------------------------------------
+# Local read-only diagnostics from closed trades. No scoring, risk, or execution impact.
+trading_brain:
+  enabled: true
+  output_dir: "data/trading_brain"
+  closed_trade_notes_enabled: true
+  edge_report_enabled: true
+  min_trades: 2
+  top_n: 5

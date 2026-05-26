@@ -146,7 +146,7 @@ All settings in `config/config.yaml`.
 | Setting | Default | Description |
 |---|---|---|
 | `trading.mode` | `paper` | `paper` / `live` / `backtest` |
-| `trading.paper_starting_equity` | `70` | Virtual USDT for paper mode |
+| `trading.paper_starting_equity` | `1000` | Virtual USDT for current paper sample collection |
 | `trading.min_score_threshold` | `42` | Minimum score to open trade |
 | `trading.max_open_trades` | `2` | Max concurrent positions |
 | `risk.default_leverage` | `5` | Leverage for new positions |
@@ -277,7 +277,7 @@ Fix:
 ```yaml
 trading:
   mode: paper
-  paper_starting_equity: 70
+  paper_starting_equity: 1000
 ```
 
 ### No trades opening (scores 60–70, below threshold)

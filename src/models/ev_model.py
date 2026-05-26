@@ -27,6 +27,7 @@ top, with hard caps).  ``kelly_raw`` keeps the un-discounted reference.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -50,6 +51,9 @@ class EVResult:
     funding_cost_pct: float = 0.0
     ev_gross_pct: float = 0.0          # before cost
     ev_net_pct: float = 0.0            # after cost (REAL value, never mangled)
+    conservative_p_win: float = 0.0    # one-sided lower confidence bound for p(win)
+    conservative_ev_net_pct: float = 0.0  # EV after p(win)/payoff/cost safety margins
+    statistical_edge_ok: bool = True
     confidence: float = 0.4            # 0..1, scales with sample size
     trade_count: int = 0               # number of realised samples used
     kelly_raw: float = 0.0             # un-discounted Kelly fraction
@@ -68,6 +72,7 @@ class EVResult:
             and self.p_win > 0.0
             and self.p_win_floor_ok
             and self.ev_floor_ok
+            and self.statistical_edge_ok
         )
 
 
@@ -88,6 +93,14 @@ class EVModel:
         self._prior_weight = float(ev_cfg.get("prior_weight_alpha", 6) or 6)  # LOWERED: trust data faster
         self._loss_shrink_factor = float(ev_cfg.get("loss_shrink_factor", 0.4) or 0.4)  # More aggressive loss trust
         self._kelly_quarter = 0.30  # UPGRADED: 30% Kelly fraction (was 25%)
+        self._statistical_gate_enabled = bool(ev_cfg.get("statistical_gate_enabled", False))
+        self._confidence_z = float(ev_cfg.get("confidence_z", 1.0) or 1.0)
+        self._payoff_haircut = float(ev_cfg.get("payoff_haircut", 0.85) or 0.85)
+        self._loss_inflation = float(ev_cfg.get("loss_inflation", 1.10) or 1.10)
+        self._cost_buffer_pct = float(ev_cfg.get("cost_buffer_pct", 0.05) or 0.05)
+        self._min_conservative_ev_pct = float(
+            ev_cfg.get("min_conservative_ev_pct", 0.0) or 0.0
+        )
 
         self._taker_fee_pct = float(
             risk_cfg.get("taker_fee_pct", backtest_cfg.get("commission_pct", 0.04) or 0.04)
@@ -117,7 +130,8 @@ class EVModel:
         if sample_size > 0:
             wins_pct = [t for t in matched if _pnl_pct(t) > 0]
             losses_pct = [t for t in matched if _pnl_pct(t) <= 0]
-            raw_p = len(wins_pct) / sample_size
+            win_count = len(wins_pct)
+            raw_p = win_count / sample_size
             p_win = self._bayes_shrink(raw_p, prior_p, sample_size)
             avg_win = (sum(_pnl_pct(t) for t in wins_pct) / len(wins_pct)) if wins_pct else 0.0
             avg_loss = (
@@ -130,6 +144,7 @@ class EVModel:
             # but keep p_win on the analytic prior.
             wins_all = [t for t in all_samples if _pnl_pct(t) > 0]
             losses_all = [t for t in all_samples if _pnl_pct(t) <= 0]
+            win_count = 0
             p_win = prior_p
             avg_win = (
                 (sum(_pnl_pct(t) for t in wins_all) / len(wins_all)) if wins_all else 1.5
@@ -146,6 +161,15 @@ class EVModel:
         if avg_win <= 0:
             avg_win = max(0.5, avg_loss * 0.6) or 1.0
         payoff = avg_win / avg_loss
+
+        # ---- Conservative statistical edge --------------------------
+        conservative_p_win = self._conservative_p_win(
+            win_count=win_count,
+            sample_size=sample_size,
+            prior_p=prior_p,
+        )
+        conservative_avg_win = avg_win * max(0.0, self._payoff_haircut)
+        conservative_avg_loss = avg_loss * max(1.0, self._loss_inflation)
 
         # ---- Cost model (% per trade) -------------------------------
         cost_pct = self._round_trip_cost_pct
@@ -166,6 +190,20 @@ class EVModel:
         # ---- EV --------------------------------------------------------
         ev_gross = p_win * avg_win - (1.0 - p_win) * avg_loss
         ev_net = ev_gross - cost_pct - funding_cost_pct
+        conservative_ev_gross = (
+            conservative_p_win * conservative_avg_win
+            - (1.0 - conservative_p_win) * conservative_avg_loss
+        )
+        conservative_ev_net = (
+            conservative_ev_gross - cost_pct - funding_cost_pct - self._cost_buffer_pct
+        )
+        statistical_edge_ok = (
+            not self._statistical_gate_enabled
+            or (
+                sample_size >= self._min_trades_for_ev
+                and conservative_ev_net >= self._min_conservative_ev_pct
+            )
+        )
 
         # ---- Kelly -----------------------------------------------------
         # Kelly = (p × b − q) / b, where b = payoff (avg_win/avg_loss).
@@ -186,7 +224,8 @@ class EVModel:
             f"prior={prior_p:.3f}, n={sample_size}); "
             f"avg_win={avg_win:.3f}% avg_loss={avg_loss:.3f}% payoff={payoff:.2f}; "
             f"ev_gross={ev_gross:+.3f}% cost={cost_pct:.3f}% funding={funding_cost_pct:.3f}% "
-            f"ev_net={ev_net:+.3f}%"
+            f"ev_net={ev_net:+.3f}% conservative_p={conservative_p_win:.3f} "
+            f"conservative_ev={conservative_ev_net:+.3f}%"
         )
 
         result = EVResult(
@@ -199,6 +238,9 @@ class EVModel:
             funding_cost_pct=round(funding_cost_pct, 4),
             ev_gross_pct=round(ev_gross, 4),
             ev_net_pct=round(ev_net, 4),
+            conservative_p_win=round(conservative_p_win, 4),
+            conservative_ev_net_pct=round(conservative_ev_net, 4),
+            statistical_edge_ok=statistical_edge_ok,
             confidence=round(confidence, 3),
             trade_count=sample_size,
             kelly_raw=round(kelly_raw, 6),
@@ -221,15 +263,18 @@ class EVModel:
         regime_target = (ctx.regime or "").strip()
         sm_target = (ctx.sm_phase or "").strip()
         direction_target = (ctx.direction or "").strip()
+        sector_target = (ctx.sector or "").strip()
 
         def _matches(t):
             t_regime = getattr(t, "regime", None) or _from_scores(t, "regime", "")
             t_sm = _from_scores(t, "sm_phase", "")
             t_dir = getattr(t, "direction", None) or ""
+            t_sector = getattr(t, "sector", None) or _from_scores(t, "sector", "")
             return (
                 t_regime == regime_target
                 and t_sm == sm_target
                 and t_dir == direction_target
+                and (not sector_target or sector_target == "unknown" or t_sector == sector_target)
             )
 
         matched = [t for t in all_samples if _matches(t)]
@@ -243,6 +288,19 @@ class EVModel:
         if raw_p < prior_p:
             alpha = alpha * self._loss_shrink_factor
         return (sample_size * raw_p + alpha * prior_p) / (sample_size + alpha)
+
+    def _conservative_p_win(self, win_count: int, sample_size: int, prior_p: float) -> float:
+        # Beta-binomial posterior lower bound. This is deliberately one-sided:
+        # EV may pass only when the lower confidence estimate still supports it.
+        alpha = max(0.01, self._prior_weight * prior_p)
+        beta = max(0.01, self._prior_weight * (1.0 - prior_p))
+        posterior_alpha = alpha + max(0, int(win_count))
+        posterior_beta = beta + max(0, int(sample_size) - int(win_count))
+        total = posterior_alpha + posterior_beta
+        mean = posterior_alpha / total
+        variance = (posterior_alpha * posterior_beta) / (total * total * (total + 1.0))
+        lower = mean - max(0.0, self._confidence_z) * math.sqrt(max(0.0, variance))
+        return max(0.01, min(0.99, lower))
 
 
 # ---- Helpers ---------------------------------------------------------------
@@ -266,4 +324,5 @@ def _match_key(trade) -> str:
     regime = getattr(trade, "regime", "") or _from_scores(trade, "regime", "")
     sm = _from_scores(trade, "sm_phase", "")
     direction = getattr(trade, "direction", "") or ""
-    return f"{regime}|{sm}|{direction}"
+    sector = getattr(trade, "sector", "") or _from_scores(trade, "sector", "")
+    return f"{regime}|{sm}|{direction}|{sector}"

@@ -50,6 +50,360 @@ Scan Pasar → Nilai Sinyal → Cek Risiko → Buka Posisi → Kelola Exit
 
 ---
 
+## Strategi Bot Saat Ini
+
+Bagian ini menjelaskan strategi operasional terbaru bot. Jika ada perbedaan antara bagian lama handbook dan catatan runtime, gunakan `session.md` dan `config/config.yaml` sebagai sumber kebenaran terbaru.
+
+### Gambaran Besar Strategi
+
+Bot ini adalah sistem trading directional untuk crypto perpetual futures. Ia bukan bot satu indikator. Entry hanya boleh terjadi setelah kandidat melewati beberapa layer validasi:
+
+1. Scanner memilih pair futures yang likuid.
+2. Market data mengambil OHLCV, funding, open interest, order book, dan konteks pasar luas.
+3. Scorer memberi nilai numerik ke setiap pair.
+4. Strategy router menentukan tesis strategi: trend, reversal, breakout, atau neutral.
+5. Setup passport dibuat sebagai kontrak tesis trade.
+6. Admission policy mengecek apakah kandidat boleh diuji di paper/live.
+7. Cohort policy dan lifecycle mengecek kesehatan pola historis.
+8. Adaptive Brain, ML, Fund Manager, Edge Detector, dan session logic memodulasi size.
+9. Risk Manager mengecek exposure, sector, direction, correlation, drawdown, dan daily loss.
+10. Trade Manager mengelola entry, TP, trailing, early cut, passport monitor, dan close.
+
+Prinsip penting: **score tinggi belum tentu open posisi**. Trade hanya dibuka kalau setup, regime, sleeve, risk, dan policy semuanya lolos.
+
+### Mode Runtime Terbaru
+
+- Mode: `paper`.
+- Starting equity paper: `$1000`.
+- Base max open trades: `2`.
+- Paper validation bisa melebar ke `5` posisi.
+- EV gate dipakai sebagai observasi/telemetry, bukan hard gate utama saat sample collection.
+- Cooldown dan loss-streak halt dinonaktifkan.
+- Loss-streak guard tetap aktif, tetapi hanya memperketat kualitas setup dan menurunkan size saat bot sedang rugi.
+- Cohort history sudah di-reset fresh setelah cohort policy baru, jadi bot belajar ulang dari data baru.
+
+### Strategy Sleeves
+
+Router mengelompokkan kandidat ke beberapa sleeve strategi:
+
+| Sleeve | Fungsi | Status |
+|---|---|---|
+| `trend_following` | Mengikuti momentum/continuation, long atau short | Sleeve utama |
+| `reversal` | Reversal setelah sweep, distribution, atau exhaustion | Aktif bersyarat |
+| `compression_breakout` | Breakout dari compression/accumulation | Eksperimental |
+| `neutral` | Tidak ada tesis strategi yang valid | Bukan alpha; hanya telemetry/shadow |
+
+`neutral` tidak boleh dianggap sebagai strategi trading utama. Jika score pair cukup tinggi tetapi router memberi `neutral`, biasanya trade tetap ditolak karena tesisnya belum jelas.
+
+### Setup Utama
+
+#### 1. Trend Continuation
+
+Ini setup utama saat market berada di `trending_expansion`.
+
+Syarat umumnya:
+
+- arah jelas, long atau short;
+- trend strength cukup;
+- struktur harga mendukung;
+- volume dan open interest menunjukkan participation;
+- tidak ada microstructure contradiction;
+- directional alignment cukup;
+- dispersion tidak terlalu merusak reliabilitas ranking.
+
+Contoh cohort/setup key:
+
+```text
+trend_continuation|trending_expansion|long
+```
+
+Expected path untuk setup ini adalah `impulse_continuation`. Jika trade tidak mengikuti path ini dan justru menghabiskan MAE tanpa MFE yang layak, passport monitor bisa menutup posisi lebih awal.
+
+#### 2. MTF Price Action Continuation
+
+Setup continuation berbasis multi-timeframe.
+
+Kondisi yang dicari:
+
+- higher timeframe trend mendukung;
+- pullback tidak merusak struktur;
+- timeframe utama menunjukkan continuation break;
+- volume/OI participation mendukung;
+- diblok saat stress paper atau dispersion high karena masih experimental.
+
+Expected path: `mtf_impulse_continuation`.
+
+#### 3. VWAP Pullback Continuation
+
+Setup trend pullback ke area VWAP lalu reclaim/continuation.
+
+Logikanya:
+
+- VWAP dipakai sebagai benchmark eksekusi institusional;
+- trend harus searah;
+- pullback masih sehat;
+- reclaim/continuation terlihat;
+- volume/OI participation mendukung.
+
+Expected path: `vwap_reclaim_continuation`.
+
+#### 4. Liquidity Sweep Reversal
+
+Setup reversal berbasis liquidity raid/reclaim.
+
+Kondisi yang dicari:
+
+- harga mengambil liquidity atau sweep extreme;
+- harga lalu reclaim/close balik;
+- kualitas setup tinggi;
+- cohort dipisahkan dari reversal generik.
+
+Expected path: `snapback_then_follow_through`.
+
+#### 5. Dedicated Short Setups
+
+Bot punya jalur short khusus untuk pola seperti:
+
+- Phase D atau post-distribution breakdown;
+- bearish liquidity sweep;
+- smart-money short setup.
+
+Ini penting karena short tidak hanya berasal dari trend turun. Ada setup short yang muncul dari distribution atau liquidity raid.
+
+### Scoring
+
+Score dihitung dari banyak komponen:
+
+- trend strength;
+- volume confirmation;
+- structure quality;
+- open interest;
+- funding sentiment;
+- order book quality;
+- volatility;
+- higher timeframe alignment;
+- smart-money context;
+- broad market context.
+
+Bobot inti saat ini:
+
+| Komponen | Bobot |
+|---|---:|
+| `trend_strength` | 20 |
+| `structure_quality` | 20 |
+| `volume_confirmation` | 15 |
+| `open_interest` | 15 |
+| `funding_sentiment` | 10 |
+| `order_book` | 10 |
+| `volatility` | 10 |
+
+Score adalah ranking awal, bukan izin open. Setelah score, kandidat masih bisa ditolak oleh router, paper scope, cohort policy, lifecycle, risk, correlation, atau slot budget.
+
+### Market Regime
+
+Regime utama:
+
+| Regime | Arti | Bias Normal |
+|---|---|---|
+| `trending_expansion` | Momentum/expansion | Trend following |
+| `accumulation_compression` | Compression sebelum breakout | Compression breakout |
+| `distribution` | Pelemahan/distribution | Reversal/short |
+| `chaos` | Noise tinggi/tidak stabil | Biasanya diblok |
+
+Jika regime `chaos`, bot biasanya tidak trade walaupun ada pergerakan besar.
+
+### Smart Money Layer
+
+Smart-money phase membaca kombinasi:
+
+- open interest;
+- funding;
+- volume buildup;
+- taker flow;
+- long/short imbalance;
+- liquidity sweep;
+- distribution/accumulation clues.
+
+Phase yang mungkin muncul:
+
+- `trending`;
+- `accumulation`;
+- `distribution`;
+- `liquidity_sweep`;
+- `neutral`;
+- `chaos`.
+
+Smart money bukan entry signal mandiri. Ia memperkuat atau melemahkan tesis router.
+
+### Market Context Layer
+
+Bot membaca konteks pasar luas agar pair-level signal tidak diperlakukan terisolasi.
+
+Field utama:
+
+- BTC trend;
+- ETH/BTC trend;
+- BTC dominance, jika feed tersedia;
+- TOTAL crypto market, jika feed tersedia;
+- risk-on/risk-off state;
+- alt rotation state;
+- confidence.
+
+Dampaknya saat ini lebih banyak berupa soft multiplier, bukan hard gate. Contoh: long alt bisa dipenalti saat broad market risk-off, tetapi market context tidak otomatis memblok semua trade sebelum attribution membuktikan sinyalnya stabil.
+
+### Setup Passport
+
+Setiap trade valid punya setup passport. Ini adalah kontrak tesis trade yang disimpan bersama posisi.
+
+Field penting:
+
+- symbol, asset, sector;
+- direction;
+- setup type;
+- sleeve;
+- regime;
+- smart-money phase;
+- quality score;
+- alignment;
+- participation;
+- funding/crowding state;
+- expected path;
+- invalidation;
+- hold profile;
+- market context saat entry.
+
+Passport dipakai untuk dua hal:
+
+1. pembelajaran cohort setelah trade close;
+2. exit lebih awal jika tesis setup gagal sebelum TP1.
+
+### Cohort dan Lifecycle
+
+Cohort adalah kelompok statistik trade yang punya setup/konteks sama.
+
+Contoh:
+
+```text
+trend_continuation|trending_expansion|long
+```
+
+Untuk setiap cohort, bot menghitung:
+
+- jumlah trade;
+- win rate;
+- profit factor;
+- expectancy;
+- drawdown;
+- lifecycle status.
+
+Status lifecycle:
+
+- `RESEARCH`;
+- `PAPER_VALIDATION`;
+- `SMALL_LIVE`;
+- `ACTIVE`;
+- `DISABLED`.
+
+Setelah reset fresh, cohort aktif mulai dari `0`. Cohort baru akan terbentuk setelah trade baru closed dan masuk learner/history baru.
+
+### Admission Policy
+
+Agar kandidat bisa open, umumnya harus lolos:
+
+- direction allowed;
+- regime allowed;
+- sleeve allowed;
+- score threshold;
+- setup quality;
+- paper validation scope;
+- duplicate-symbol check;
+- cohort policy;
+- lifecycle status;
+- risk budget;
+- sector cap;
+- direction cap;
+- correlation filter;
+- exposure cap.
+
+Paper validation lebih longgar dari live agar sample terkumpul, tetapi tetap bukan bebas. Ada score floor, high-conviction path, positive-EV probe untuk short liquidity sweep tertentu, dan stress tightening saat daily loss/loss streak memburuk.
+
+### Risk dan Sizing
+
+Parameter penting saat ini:
+
+| Parameter | Nilai |
+|---|---:|
+| Base risk per trade | `1.5%` |
+| Max risk per trade | `2.5%` |
+| Daily loss cap | `5.0%` |
+| Max drawdown | `20.0%` |
+| Max sector risk | `2.5%` |
+| Max direction risk | `5.5%` |
+| Default leverage | `6x` |
+| Max leverage | `12x` |
+
+Size tidak hanya dihitung oleh Risk Manager. Size juga dimodulasi oleh:
+
+- Adaptive Brain;
+- Fund Manager;
+- Kelly sizing;
+- cohort confidence;
+- Edge Detector;
+- session factor;
+- strategy sleeve multiplier;
+- loss-streak guard;
+- sector/direction exposure.
+
+Akibatnya, score tinggi tetap bisa mendapat size kecil jika konteks atau risk tidak mendukung.
+
+### Exit Logic
+
+Trade Manager mengelola beberapa exit layer:
+
+1. Take profit bertahap: TP1, TP2, lalu trailing runner.
+2. Breakeven: stop bisa digeser ke breakeven setelah MFE tertentu.
+3. ATR trailing: trailing disesuaikan per exit profile.
+4. Early cut: loser bisa dipotong sebelum full SL jika MAE besar dan MFE lemah.
+5. Passport monitor: posisi bisa ditutup sebelum TP1 jika tesis setup gagal.
+
+Exit profile berbeda per sleeve:
+
+| Sleeve | Karakter Exit |
+|---|---|
+| `trend_following` | Target lebih jauh, runner lebih besar |
+| `compression_breakout` | Target sedang, trailing cukup aktif |
+| `reversal` | Target lebih cepat, hold lebih pendek |
+
+### Adaptive Brain dan ML
+
+`AdaptiveBrain` aktif sebagai overlay, bukan otak utama. Ia membantu menilai pair health, menyesuaikan size, membaca edge/decay, dan memberi tekanan ke sleeve yang lebih sehat.
+
+`MLPredictor` masih pasif/helper. ML belum menjadi pengambil keputusan utama karena sample live/paper yang bersih belum cukup.
+
+### Position Rotation
+
+Jika slot penuh, bot bisa mengganti posisi lemah dengan kandidat yang jauh lebih kuat.
+
+Syaratnya ketat:
+
+- kandidat baru harus punya score jauh lebih tinggi;
+- kualitas minimal terpenuhi;
+- p_win minimal terpenuhi;
+- EV tidak terlalu buruk;
+- posisi lama cukup tua;
+- posisi yang sudah TP1/protected tidak mudah diganggu;
+- jumlah rotasi per cycle dan per hari dibatasi.
+
+Tujuannya mencegah slot penuh oleh posisi medioker tanpa membuat bot overtrade.
+
+### Ringkasan Strategi
+
+Strategi bot ini adalah **multi-layer systematic futures strategy** yang mencari continuation, reversal, dan breakout di crypto perpetual futures. Setiap entry divalidasi lewat score, regime, smart money, market context, setup passport, cohort learning, lifecycle status, dan risk guard.
+
+Pada fase runtime saat ini, tujuan utama adalah **paper sample collection yang bersih** setelah cohort policy baru. Karena history lama sudah di-reset, bot sedang membangun ulang statistik setup dari trade fresh yang sesuai arsitektur terbaru.
+
+---
+
 ## Pipeline Penilaian Sinyal (6 Langkah)
 
 Sebelum bot membuka posisi, sinyal harus **lolos semua 6 tahap** berikut:
@@ -392,7 +746,7 @@ logs/
 ```yaml
 trading:
   mode: paper                      # paper | live | backtest
-  paper_starting_equity: 70        # Ekuitas virtual $70
+  paper_starting_equity: 1000      # Ekuitas virtual paper sample collection saat ini
   min_score_threshold: 42          # Skor minimum untuk trade
   max_open_trades: 2               # Maksimum 2 posisi sekaligus
   regime_thresholds:

@@ -144,6 +144,46 @@ class TradeDataPoint:
     volatility_bucket: str = "unknown"
     trend_bucket: str = "unknown"
     strategy_name: str = "unknown"
+    setup_type: str = "unknown"
+    setup_quality_score: float = 0.0
+    setup_sector: str = "unknown"
+    setup_rotation_state: str = "unknown"
+    setup_crowding_state: str = "unknown"
+    setup_funding_state: str = "unknown"
+    setup_microstructure_state: str = "unknown"
+    setup_expected_path: str = "unknown"
+    setup_hold_profile: str = "unknown"
+
+    # ── Broad market context ─────────────────────────────────────────────
+    market_btc_trend: str = "unknown"
+    market_eth_btc_trend: str = "unknown"
+    market_btc_d_trend: str = "unknown"
+    market_total_trend: str = "unknown"
+    market_risk_on_state: str = "unknown"
+    market_rotation_state: str = "unknown"
+    market_context_confidence: float = 0.0
+    sector_rotation_state: str = "unknown"
+    sector_rotation_rank: int = 0
+    sector_rotation_relative_btc_pct: float = 0.0
+    sector_rotation_breadth: float = 0.0
+    sector_rotation_confidence: float = 0.0
+
+    # ── Causal time-series diagnostics ──────────────────────────────────
+    time_series_state: str = "unknown"
+    time_series_ewma_vol_pct: float = 0.0
+    time_series_realized_vol_pct: float = 0.0
+    time_series_volatility_ratio: float = 1.0
+    time_series_latest_abs_return_z: float = 0.0
+    time_series_drift_t_stat: float = 0.0
+    time_series_stability_score: float = 0.0
+    time_series_markov_state: str = "unknown"
+    time_series_markov_bull_prob: float = 0.0
+    time_series_markov_bear_prob: float = 0.0
+    time_series_markov_sideways_prob: float = 0.0
+    time_series_markov_edge: float = 0.0
+    time_series_score_mult: float = 1.0
+    time_series_size_mult: float = 1.0
+    time_series_reason: str = ""
 
     # ── Position setup (null for no_trade) ───────────────────────────────
     entry_price: Optional[float] = None
@@ -195,6 +235,10 @@ def _extract_signal_fields(bd, snap, score_threshold: float) -> dict:
     fv  = bd.feature_vector
     sm  = bd.smart_money
     sc  = bd.spot_context or (snap.spot_context if snap else None)
+    passport = getattr(bd, "setup_passport", None)
+    market_ctx = getattr(bd, "market_context", None) or (getattr(snap, "market_context", None) if snap else None)
+    sector_rotation = getattr(bd, "sector_rotation", None) or (getattr(snap, "sector_rotation", None) if snap else None)
+    ts_diag = getattr(bd, "time_series", None) or (getattr(snap, "time_series", None) if snap else None)
 
     regime_str  = bd.regime.value if bd.regime else "chaos"
     regime_code = _REGIME_MAP.get(regime_str, 0)
@@ -276,6 +320,42 @@ def _extract_signal_fields(bd, snap, score_threshold: float) -> dict:
         volatility_bucket=("low" if bd.volatility <= 20 else "medium" if bd.volatility <= 40 else "high" if bd.volatility <= 70 else "extreme"),
         trend_bucket=("weak" if bd.trend_strength < 40 else "moderate" if bd.trend_strength < 65 else "strong" if bd.trend_strength < 85 else "very_strong"),
         strategy_name=str(getattr(bd, "strategy_sleeve", "unknown") or "unknown"),
+        setup_type=str(getattr(bd, "setup_type", "unknown") or "unknown"),
+        setup_quality_score=float(getattr(bd, "setup_quality_score", 0.0) or 0.0),
+        setup_sector=str(getattr(passport, "sector", "unknown") if passport else "unknown"),
+        setup_rotation_state=str(getattr(passport, "rotation_state", "unknown") if passport else "unknown"),
+        setup_crowding_state=str(getattr(passport, "crowding_state", "unknown") if passport else "unknown"),
+        setup_funding_state=str(getattr(passport, "funding_state", "unknown") if passport else "unknown"),
+        setup_microstructure_state=str(getattr(passport, "microstructure_state", "unknown") if passport else "unknown"),
+        setup_expected_path=str(getattr(passport, "expected_path", "unknown") if passport else "unknown"),
+        setup_hold_profile=str(getattr(passport, "hold_profile", "unknown") if passport else "unknown"),
+        market_btc_trend=str(getattr(market_ctx, "btc_trend", "unknown") if market_ctx else "unknown"),
+        market_eth_btc_trend=str(getattr(market_ctx, "eth_btc_trend", "unknown") if market_ctx else "unknown"),
+        market_btc_d_trend=str(getattr(market_ctx, "btc_d_trend", "unknown") if market_ctx else "unknown"),
+        market_total_trend=str(getattr(market_ctx, "total_trend", "unknown") if market_ctx else "unknown"),
+        market_risk_on_state=str(getattr(market_ctx, "risk_on_state", "unknown") if market_ctx else "unknown"),
+        market_rotation_state=str(getattr(market_ctx, "rotation_state", "unknown") if market_ctx else "unknown"),
+        market_context_confidence=float(getattr(market_ctx, "confidence", 0.0) if market_ctx else 0.0),
+        sector_rotation_state=str(getattr(sector_rotation, "state", "unknown") if sector_rotation else "unknown"),
+        sector_rotation_rank=int(getattr(sector_rotation, "rank", 0) if sector_rotation else 0),
+        sector_rotation_relative_btc_pct=float(getattr(sector_rotation, "relative_btc_pct", 0.0) if sector_rotation else 0.0),
+        sector_rotation_breadth=float(getattr(sector_rotation, "breadth", 0.0) if sector_rotation else 0.0),
+        sector_rotation_confidence=float(getattr(sector_rotation, "confidence", 0.0) if sector_rotation else 0.0),
+        time_series_state=str(getattr(ts_diag, "state", "unknown") if ts_diag else "unknown"),
+        time_series_ewma_vol_pct=float(getattr(ts_diag, "ewma_vol_pct", 0.0) if ts_diag else 0.0),
+        time_series_realized_vol_pct=float(getattr(ts_diag, "realized_vol_pct", 0.0) if ts_diag else 0.0),
+        time_series_volatility_ratio=float(getattr(ts_diag, "volatility_ratio", 1.0) if ts_diag else 1.0),
+        time_series_latest_abs_return_z=float(getattr(ts_diag, "latest_abs_return_z", 0.0) if ts_diag else 0.0),
+        time_series_drift_t_stat=float(getattr(ts_diag, "drift_t_stat", 0.0) if ts_diag else 0.0),
+        time_series_stability_score=float(getattr(ts_diag, "stability_score", 0.0) if ts_diag else 0.0),
+        time_series_markov_state=str(getattr(ts_diag, "markov_state", "unknown") if ts_diag else "unknown"),
+        time_series_markov_bull_prob=float(getattr(ts_diag, "markov_bull_prob", 0.0) if ts_diag else 0.0),
+        time_series_markov_bear_prob=float(getattr(ts_diag, "markov_bear_prob", 0.0) if ts_diag else 0.0),
+        time_series_markov_sideways_prob=float(getattr(ts_diag, "markov_sideways_prob", 0.0) if ts_diag else 0.0),
+        time_series_markov_edge=float(getattr(ts_diag, "markov_edge", 0.0) if ts_diag else 0.0),
+        time_series_score_mult=float(getattr(bd, "time_series_score_mult", 1.0) or 1.0),
+        time_series_size_mult=float(getattr(bd, "time_series_size_mult", 1.0) or 1.0),
+        time_series_reason=str(getattr(bd, "time_series_reason", "") or ""),
     )
 
 

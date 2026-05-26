@@ -56,6 +56,8 @@ class RejectionRecord:
 
     # Context
     setup_type: str
+    strategy_sleeve: str
+    setup_quality_score: float
     direction: str
     total_score: float
     regime_state: str
@@ -295,7 +297,24 @@ class RejectionLogger:
         sym = symbol if symbol is not None else (b.symbol if b is not None else "")
         direction = b.direction if b is not None else ""
         regime_state = b.regime.value if (b is not None and b.regime is not None) else ""
-        setup_type = f"{regime_state or 'na'}_{direction or 'na'}"
+        setup_type = ""
+        strategy_sleeve = ""
+        setup_quality_score = 0.0
+        if b is not None:
+            setup_type = str(getattr(b, "setup_type", "") or "")
+            strategy_sleeve = str(getattr(b, "strategy_sleeve", "") or "")
+            setup_quality_score = float(getattr(b, "setup_quality_score", 0.0) or 0.0)
+            passport = getattr(b, "setup_passport", None)
+            if not setup_type and passport is not None:
+                setup_type = str(getattr(passport, "setup_type", "") or "")
+            if not strategy_sleeve and passport is not None:
+                strategy_sleeve = str(getattr(passport, "sleeve", "") or "")
+            if not setup_quality_score and passport is not None:
+                setup_quality_score = float(getattr(passport, "quality_score", 0.0) or 0.0)
+        if not setup_type:
+            setup_type = f"{regime_state or 'na'}_{direction or 'na'}"
+        if not strategy_sleeve:
+            strategy_sleeve = "unknown"
 
         return RejectionRecord(
             ts=time.time(),
@@ -303,6 +322,8 @@ class RejectionLogger:
             stage=stage,
             reject_reason=reason,
             setup_type=setup_type,
+            strategy_sleeve=strategy_sleeve,
+            setup_quality_score=round(float(setup_quality_score), 4),
             direction=direction,
             total_score=float(b.total_score) if b is not None else 0.0,
             regime_state=regime_state,

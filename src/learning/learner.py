@@ -18,7 +18,88 @@ log = logging.getLogger(__name__)
 
 def _trade_record_from_dict(data: dict) -> "TradeRecord":
     allowed = {field.name for field in fields(TradeRecord)}
-    return TradeRecord(**{key: value for key, value in data.items() if key in allowed})
+    record = TradeRecord(**{key: value for key, value in data.items() if key in allowed})
+    _backfill_trade_context(record)
+    return record
+
+
+def _backfill_trade_context(record: "TradeRecord") -> bool:
+    """Fill context fields for legacy/restored records without pending scores."""
+    from datetime import datetime, timezone
+
+    from src.models.strategy_passport import asset_from_symbol, sector_for_asset
+    from src.session_clock import active_market_session_key
+
+    changed = False
+    scores = record.scores if isinstance(record.scores, dict) else {}
+    if not isinstance(record.scores, dict):
+        record.scores = scores
+        changed = True
+
+    opened_at = float(record.opened_at or 0.0)
+    if opened_at > 0:
+        tm = time.gmtime(opened_at)
+        dt = datetime.fromtimestamp(opened_at, tz=timezone.utc)
+        if Learner._safe_int(record.hour_of_day, -1) < 0:
+            record.hour_of_day = int(tm.tm_hour)
+            changed = True
+        if Learner._safe_int(record.day_of_week, -1) < 0:
+            record.day_of_week = int(tm.tm_wday)
+            changed = True
+        if not record.session or str(record.session).lower() == "unknown":
+            record.session = active_market_session_key(dt)
+            changed = True
+
+    if not record.asset or str(record.asset).lower() == "unknown":
+        record.asset = asset_from_symbol(record.symbol)
+        changed = True
+    if not record.sector or str(record.sector).lower() == "unknown":
+        record.sector = sector_for_asset(record.asset)
+        changed = True
+
+    market_defaults = {
+        "market_risk_on_state": "unknown",
+        "market_rotation_state": "unknown",
+        "market_btc_trend": "unknown",
+        "market_eth_btc_trend": "unknown",
+        "market_btc_d_trend": "unknown",
+        "market_total_trend": "unknown",
+    }
+    for key, fallback in market_defaults.items():
+        current = getattr(record, key, fallback)
+        score_value = scores.get(key)
+        if (not current or str(current).lower() == "unknown") and score_value:
+            setattr(record, key, str(score_value))
+            changed = True
+    if float(getattr(record, "market_context_confidence", 0.0) or 0.0) <= 0.0:
+        try:
+            score_conf = float(scores.get("market_context_confidence", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            score_conf = 0.0
+        if score_conf > 0.0:
+            record.market_context_confidence = score_conf
+            changed = True
+
+    defaults = {
+        "session": record.session,
+        "hour_of_day": record.hour_of_day,
+        "day_of_week": record.day_of_week,
+        "asset": record.asset,
+        "sector": record.sector,
+        "market_risk_on_state": record.market_risk_on_state,
+        "market_rotation_state": record.market_rotation_state,
+        "market_btc_trend": record.market_btc_trend,
+        "market_eth_btc_trend": record.market_eth_btc_trend,
+        "market_btc_d_trend": record.market_btc_d_trend,
+        "market_total_trend": record.market_total_trend,
+        "market_context_confidence": record.market_context_confidence,
+    }
+    for key, value in defaults.items():
+        current = scores.get(key)
+        if current is None or str(current).lower() == "unknown" or current == -1:
+            scores[key] = value
+            changed = True
+    return changed
 
 
 @dataclass
@@ -47,7 +128,17 @@ class TradeRecord:
     fees_slippage_pct: float = 0.0
     timeframe: str = "unknown"
     session: str = "unknown"
+    hour_of_day: int = -1
+    day_of_week: int = -1
     asset: str = "unknown"
+    sector: str = "unknown"
+    market_risk_on_state: str = "unknown"
+    market_rotation_state: str = "unknown"
+    market_btc_trend: str = "unknown"
+    market_eth_btc_trend: str = "unknown"
+    market_btc_d_trend: str = "unknown"
+    market_total_trend: str = "unknown"
+    market_context_confidence: float = 0.0
     signal_type: str = "unknown"
     entry_reason: str = "unknown"
     volatility_bucket: str = "unknown"
@@ -119,6 +210,7 @@ class Learner:
         # E.g., "structure_quality" matters more for short-in-distribution than
         # for long-in-trending. This gives the bot adaptive edge per context.
         self._regime_direction_adjust(recent, signal_keys)
+        self._context_adjust(recent, signal_keys)
 
         # Re-normalise to keep total weight sum unchanged
         total = sum(self._weights.values())
@@ -181,6 +273,118 @@ class Learner:
                     penalty = (loss_avg.get(key, 50.0) - 50.0) / 50.0 * regime_adj_rate
                     self._weights[key] = max(1.0, self._weights[key] - penalty * 0.5)
 
+    def _context_adjust(self, recent: list["TradeRecord"], signal_keys: list[str]) -> None:
+        """
+        Conservative sector x time learning.
+
+        This is intentionally a small modulation of the existing score weights,
+        not a new gate. It lets the learner notice that a signal component works
+        better in a specific sector/session/hour/day context while preserving
+        the current admission, risk, and scoring contracts.
+        """
+        from collections import defaultdict
+
+        groups: dict[str, list[TradeRecord]] = defaultdict(list)
+        for trade in recent:
+            for key in self._context_keys(trade):
+                groups[key].append(trade)
+
+        context_adj_rate = self._adj_rate * 0.25
+        accumulated = {key: 0.0 for key in signal_keys}
+        for trades in groups.values():
+            if len(trades) < 4:
+                continue
+
+            wins = [t for t in trades if t.pnl_usd > 0]
+            losses = [t for t in trades if t.pnl_usd <= 0]
+            if not wins or not losses:
+                continue
+
+            wr = len(wins) / len(trades)
+            if 0.45 < wr < 0.55:
+                continue
+
+            win_avg = self._avg_scores(wins, signal_keys)
+            loss_avg = self._avg_scores(losses, signal_keys)
+            strength = min(1.0, len(trades) / max(8.0, float(self._min_trades)))
+
+            for key in signal_keys:
+                delta = (win_avg.get(key, 50.0) - loss_avg.get(key, 50.0)) / 50.0
+                adjustment = delta * context_adj_rate * strength
+                accumulated[key] += adjustment if wr >= 0.55 else adjustment * 0.5
+
+        cap = context_adj_rate * 2.0
+        for key, adjustment in accumulated.items():
+            clipped = max(-cap, min(cap, adjustment))
+            if clipped:
+                self._weights[key] = max(1.0, self._weights[key] + clipped)
+
+    @staticmethod
+    def _context_keys(trade: "TradeRecord") -> list[str]:
+        scores = trade.scores if isinstance(trade.scores, dict) else {}
+        sector = Learner._metadata_value(trade.sector, scores.get("sector"), scores.get("setup_sector"))
+        session = Learner._metadata_value(trade.session, scores.get("session"))
+        hour = Learner._safe_int(getattr(trade, "hour_of_day", -1), -1)
+        if hour < 0:
+            hour = Learner._safe_int(scores.get("hour_of_day", scores.get("hour_utc", -1)), -1)
+        day = Learner._safe_int(getattr(trade, "day_of_week", -1), -1)
+        if day < 0:
+            day = Learner._safe_int(scores.get("day_of_week", -1), -1)
+
+        sector = str(sector or "unknown").strip().lower() or "unknown"
+        session = str(session or "unknown").strip().lower() or "unknown"
+        keys: list[str] = []
+        if sector != "unknown" and session != "unknown" and hour >= 0 and day >= 0:
+            hour_bucket = f"h{(hour // 4) * 4:02d}"
+            keys.extend([
+                f"sector_session_hour_day|{sector}|{session}|{hour_bucket}|d{day}",
+                f"sector_session_hour|{sector}|{session}|{hour_bucket}",
+                f"sector_session_day|{sector}|{session}|d{day}",
+                f"sector_session|{sector}|{session}",
+            ])
+
+        risk_state = Learner._metadata_value(
+            getattr(trade, "market_risk_on_state", "unknown"),
+            scores.get("market_risk_on_state"),
+        ).lower()
+        rotation_state = Learner._metadata_value(
+            getattr(trade, "market_rotation_state", "unknown"),
+            scores.get("market_rotation_state"),
+        ).lower()
+        btc_trend = Learner._metadata_value(
+            getattr(trade, "market_btc_trend", "unknown"),
+            scores.get("market_btc_trend"),
+        ).lower()
+        eth_btc_trend = Learner._metadata_value(
+            getattr(trade, "market_eth_btc_trend", "unknown"),
+            scores.get("market_eth_btc_trend"),
+        ).lower()
+
+        if risk_state != "unknown":
+            keys.append(f"market_risk|{risk_state}")
+        if rotation_state != "unknown":
+            keys.append(f"market_rotation|{rotation_state}")
+        if risk_state != "unknown" and rotation_state != "unknown":
+            keys.append(f"market_context|{risk_state}|{rotation_state}")
+        if btc_trend != "unknown" and eth_btc_trend != "unknown":
+            keys.append(f"market_btc_ethbtc|{btc_trend}|{eth_btc_trend}")
+        return keys
+
+    @staticmethod
+    def _metadata_value(*values) -> str:
+        for value in values:
+            text = str(value or "").strip()
+            if text and text.lower() != "unknown":
+                return text
+        return "unknown"
+
+    @staticmethod
+    def _safe_int(value, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
     @staticmethod
     def _avg_scores(trades: list[TradeRecord], keys: list[str]) -> dict[str, float]:
         acc: dict[str, float] = {k: 0.0 for k in keys}
@@ -216,8 +420,29 @@ class Learner:
             for k in self._weights:
                 if k in loaded_weights:
                     self._weights[k] = float(loaded_weights[k])
+            backfilled = False
             for t in state.get("trade_log", []):
-                self._trade_log.append(_trade_record_from_dict(t))
+                record = _trade_record_from_dict(t)
+                self._trade_log.append(record)
+                backfilled = backfilled or any(
+                    t.get(key) != getattr(record, key)
+                    for key in (
+                        "session",
+                        "hour_of_day",
+                        "day_of_week",
+                        "asset",
+                        "sector",
+                        "market_risk_on_state",
+                        "market_rotation_state",
+                        "market_btc_trend",
+                        "market_eth_btc_trend",
+                        "market_btc_d_trend",
+                        "market_total_trend",
+                        "market_context_confidence",
+                    )
+                )
+            if backfilled:
+                self._save_state()
             log.info("Learner state loaded: %d trades, weights=%s", len(self._trade_log), self._weights)
         except Exception as exc:
             log.warning("Could not load learner state: %s", exc)

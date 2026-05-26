@@ -114,9 +114,15 @@ class KellySizer:
 
         # ── Final risk % ──────────────────────────────────────────────
         if fractional_kelly <= 0 or not ev.is_tradeable:
-            # Fall back to default when Kelly is flat or uninformative
-            risk_pct = self._default_risk_pct
-            rationale = f"Fallback to default {risk_pct:.1%} (Kelly={fractional_kelly:.3%})"
+            # When EV is available but not statistically tradeable yet, do not
+            # give it the same risk as a validated edge. Keep exploration alive,
+            # but make the fallback proportional to posterior quality.
+            edge_scalar = self._fallback_edge_scalar(ev)
+            risk_pct = self._default_risk_pct * edge_scalar
+            rationale = (
+                f"Fallback {self._default_risk_pct:.1%} ×{edge_scalar:.2f}posterior "
+                f"(Kelly={fractional_kelly:.3%})"
+            )
         else:
             risk_pct = fractional_kelly * vol_scalar * confidence_mult
             rationale = (
@@ -145,6 +151,32 @@ class KellySizer:
             r_distance_pct=round(r_distance_pct * 100, 4),
             rationale=rationale,
         )
+
+    @staticmethod
+    def _fallback_edge_scalar(ev: EVResult) -> float:
+        p_win = min(0.85, max(0.15, float(getattr(ev, "p_win", 0.5) or 0.5)))
+        conservative_p = float(getattr(ev, "conservative_p_win", 0.0) or 0.0)
+        if conservative_p > 0.0:
+            p_win = 0.65 * p_win + 0.35 * min(0.85, max(0.15, conservative_p))
+
+        ev_net = float(getattr(ev, "ev_net_pct", 0.0) or 0.0)
+        conservative_ev = float(getattr(ev, "conservative_ev_net_pct", 0.0) or 0.0)
+        confidence = min(1.0, max(0.0, float(getattr(ev, "confidence", 0.0) or 0.0)))
+
+        probability_term = (p_win - 0.50) * 2.0
+        ev_term = max(-1.0, min(1.0, ev_net / 1.0))
+        conservative_term = max(-1.0, min(1.0, conservative_ev / 1.0))
+        evidence = 0.65 * probability_term + 0.25 * ev_term + 0.10 * conservative_term
+        scalar = 0.75 + 0.35 * evidence
+
+        if ev_net < 0.0 and p_win < 0.45:
+            scalar -= min(0.25, abs(ev_net) * 0.12 + (0.45 - p_win) * 0.50)
+        if confidence < 0.30 and ev_net <= 0.0:
+            scalar -= (0.30 - confidence) * 0.25
+        if ev_net > 0.0 and p_win >= 0.53:
+            scalar += min(0.12, ev_net * 0.04 + (p_win - 0.53) * 0.40)
+
+        return float(min(1.10, max(0.35, scalar)))
 
 
 def _zero_result(reason: str) -> KellyResult:

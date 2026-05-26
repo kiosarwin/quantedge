@@ -9,6 +9,10 @@ def _cfg():
             "trend_min_score": 65,
             "trend_min_structure": 58,
             "trend_long_only": True,
+            "trend_require_participation": True,
+            "trend_min_alignment": 0.54,
+            "breakout_min_alignment": 0.57,
+            "reversal_min_alignment": 0.45,
             "enable_compression_breakout": False,
             "reversal_max_volatility": 75,
             "allow_long_reversal": True,
@@ -39,6 +43,24 @@ def _short_setup(label: str = "phase_d", confidence: float = 0.80):
     )
 
 
+def _feature_vector(
+    alignment=0.62,
+    market_structure="none",
+    order_flow_imbalance=0.0,
+    momentum_strength=0.0,
+    vwap_distance=0.0,
+    liquidation_pressure=0.0,
+):
+    return SimpleNamespace(
+        market_structure=market_structure,
+        order_flow_imbalance=order_flow_imbalance,
+        momentum_strength=momentum_strength,
+        vwap_distance=vwap_distance,
+        liquidation_pressure=liquidation_pressure,
+        directional_alignment=lambda _direction: alignment,
+    )
+
+
 def _breakdown(
     direction="long",
     regime="trending_expansion",
@@ -52,6 +74,7 @@ def _breakdown(
     volatility=25.0,
     trend_strength=72.0,
     short_setup=None,
+    feature_vector=None,
 ):
     return SimpleNamespace(
         direction=direction,
@@ -68,6 +91,7 @@ def _breakdown(
         volatility=volatility,
         trend_strength=trend_strength,
         short_setup=short_setup,
+        feature_vector=feature_vector,
     )
 
 
@@ -128,7 +152,7 @@ def test_strategy_router_allows_compression_breakout_only_with_participation():
     assert "compression + participation" in decision.reason
 
 
-def test_strategy_router_allows_trend_following_with_soft_funding_bias():
+def test_strategy_router_blocks_thin_trend_when_participation_required():
     router = StrategyRouter(_cfg())
     decision = router.evaluate(
         _breakdown(
@@ -142,8 +166,52 @@ def test_strategy_router_allows_trend_following_with_soft_funding_bias():
         ),
         DispersionState(value=0.0, state="normal"),
     )
+    assert decision.sleeve == "neutral"
+    assert "not aligned" in decision.reason or "weak directional alignment" in decision.reason
+
+
+def test_strategy_router_blocks_long_when_microstructure_contradicts_direction():
+    router = StrategyRouter(_cfg())
+    decision = router.evaluate(
+        _breakdown(
+            direction="long",
+            regime="trending_expansion",
+            sm_phase="trending",
+            sm_bias="long",
+            feature_vector=_feature_vector(
+                alignment=0.70,
+                market_structure="bearish_bos",
+                order_flow_imbalance=-35.0,
+                momentum_strength=-20.0,
+            ),
+        ),
+        DispersionState(value=0.0, state="normal"),
+    )
+    assert decision.sleeve == "neutral"
+    assert "microstructure contradicts" in decision.reason
+
+
+def test_strategy_router_allows_short_trend_with_bearish_microstructure():
+    router = StrategyRouter(_cfg())
+    decision = router.evaluate(
+        _breakdown(
+            direction="short",
+            regime="trending_expansion",
+            sm_phase="neutral",
+            sm_bias="short",
+            feature_vector=_feature_vector(
+                alignment=0.68,
+                market_structure="bearish_bos",
+                order_flow_imbalance=-30.0,
+                momentum_strength=-25.0,
+                vwap_distance=-1.0,
+            ),
+        ),
+        DispersionState(value=0.0, state="normal"),
+    )
     assert decision.sleeve == "trend_following"
-    assert "trend sleeve via trending_expansion" in decision.reason
+    assert decision.setup_type == "trend_continuation"
+    assert decision.quality_score > 0
 
 
 def test_strategy_router_identifies_short_reversal_candidate():
@@ -226,3 +294,123 @@ def test_short_setup_blocked_by_low_structure_quality():
         short_setup=_short_setup("phase_d", confidence=0.80),
     )
     assert router.is_short_setup_candidate(breakdown) is False
+
+
+def test_strategy_router_builds_explicit_setup_passport_with_rotation_context():
+    router = StrategyRouter(_cfg())
+    decision = router.evaluate(
+        _breakdown(
+            direction="short",
+            regime="trending_expansion",
+            sm_phase="neutral",
+            sm_bias="short",
+            feature_vector=_feature_vector(
+                alignment=0.68,
+                market_structure="bearish_bos",
+                order_flow_imbalance=-30.0,
+                momentum_strength=-25.0,
+                vwap_distance=-1.0,
+                liquidation_pressure=55.0,
+            ),
+        ),
+        DispersionState(value=0.0, state="normal"),
+    )
+
+    assert decision.passport is not None
+    assert decision.passport.setup_type == "trend_continuation"
+    assert decision.passport.sleeve == "trend_following"
+    assert decision.passport.microstructure_state == "aligned"
+    assert decision.passport.expected_path == "impulse_continuation"
+    assert decision.passport.decision == "eligible"
+
+
+def test_strategy_router_passport_marks_no_trade_contradiction():
+    router = StrategyRouter(_cfg())
+    decision = router.evaluate(
+        _breakdown(
+            direction="long",
+            regime="trending_expansion",
+            sm_phase="trending",
+            sm_bias="long",
+            feature_vector=_feature_vector(
+                alignment=0.70,
+                market_structure="bearish_bos",
+                order_flow_imbalance=-35.0,
+                momentum_strength=-20.0,
+            ),
+        ),
+        DispersionState(value=0.0, state="normal"),
+    )
+
+    assert decision.passport is not None
+    assert decision.passport.setup_type == "no_trade"
+    assert decision.passport.microstructure_state == "contradicts_direction"
+    assert decision.passport.decision == "no_trade"
+
+
+def test_sector_for_asset_classifies_esports_from_binance_alpha_config():
+    from src.models.strategy_passport import binance_alpha_assets, sector_for_asset
+
+    for asset in ("B2", "ESPORTS", "HANA", "Q", "USELESS"):
+        assert asset in binance_alpha_assets()
+        assert sector_for_asset(asset) == "binance_alpha"
+
+
+def test_sector_for_asset_classifies_current_non_alpha_universe():
+    from src.models.strategy_passport import sector_for_asset
+
+    expected = {
+        "ADA": "l1",
+        "ASTER": "perp_dex",
+        "BZ": "new_listing",
+        "CL": "commodity",
+        "DEXE": "defi",
+        "EDEN": "rwa",
+        "EIGEN": "restaking",
+        "ENA": "defi",
+        "ERA": "l2",
+        "FIDA": "solana_ecosystem",
+        "GENIUS": "new_listing",
+        "HYPE": "perp_dex",
+        "LINK": "oracle",
+        "LIT": "privacy_infra",
+        "MU": "tradfi_equity",
+        "NIL": "privacy_ai",
+        "ONDO": "rwa",
+        "PLUME": "rwa",
+        "PHA": "depin",
+        "SAGA": "gaming",
+        "TON": "l1",
+        "TRX": "l1",
+        "UNI": "defi",
+        "XAG": "commodity",
+        "XAU": "commodity",
+        "XRP": "payments",
+        "ZEC": "privacy",
+    }
+    for asset, sector in expected.items():
+        assert sector_for_asset(asset) == sector
+
+
+def test_register_market_sectors_classifies_unknown_binance_metadata():
+    from src.models import strategy_passport as passport
+
+    passport._DYNAMIC_SECTOR_MAP.pop("ZZZ", None)
+    passport._DYNAMIC_SECTOR_MAP.pop("NEWL1", None)
+    registered = passport.register_market_sectors(
+        {
+            "ZZZ/USDT:USDT": {
+                "base": "ZZZ",
+                "info": {"underlyingType": "EQUITY", "underlyingSubType": ["TradFi"]},
+            },
+            "NEWL1/USDT:USDT": {
+                "base": "NEWL1",
+                "info": {"underlyingType": "CRYPTO", "underlyingSubType": ["Layer-1"]},
+            },
+        }
+    )
+
+    assert registered["ZZZ"] == "tradfi_equity"
+    assert registered["NEWL1"] == "l1"
+    assert passport.sector_for_asset("ZZZ") == "tradfi_equity"
+    assert passport.sector_for_asset("NEWL1") == "l1"

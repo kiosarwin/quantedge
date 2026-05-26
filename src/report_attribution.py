@@ -65,6 +65,8 @@ def main() -> None:
             f"Worst exit: {report['headline'].get('worst_exit_profile') or 'n/a'}",
             f"Best dispersion: {report['headline'].get('best_dispersion_state') or 'n/a'}",
             f"Worst dispersion: {report['headline'].get('worst_dispersion_state') or 'n/a'}",
+            f"Best market: {report['headline'].get('best_market_context') or 'n/a'}",
+            f"Worst market: {report['headline'].get('worst_market_context') or 'n/a'}",
         ]),
         title="Strategy Attribution",
         border_style="cyan",
@@ -73,6 +75,10 @@ def main() -> None:
     _render_rows("By Sleeve", report["by_sleeve"])
     _render_rows("By Exit Profile", report["by_exit_profile"])
     _render_rows("By Dispersion State", report["by_dispersion_state"])
+    _render_rows("By Market Risk State", report["by_market_risk_state"])
+    _render_rows("By Market Rotation State", report["by_market_rotation_state"])
+    _render_rows("By Market Context", report["by_market_context"])
+    _render_rows("By BTC x ETH/BTC Trend", report["by_market_btc_ethbtc"])
     _render_rows("By Regime", report["by_regime"])
     _render_rows("By Side", report["by_side"])
     _render_rows("By Regime x Side", report["by_regime_side"])

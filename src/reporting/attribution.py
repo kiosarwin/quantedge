@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict
 from typing import Callable
+from src.models.strategy_passport import sector_for_asset, asset_from_symbol
 
 
 @dataclass
@@ -42,6 +43,20 @@ def _safe_sleeve(trade) -> str:
     return "unknown"
 
 
+
+
+def _safe_setup_type(trade) -> str:
+    explicit = getattr(trade, "setup_type", "") or str(getattr(trade, "scores", {}).get("setup_type", "") or "")
+    return explicit or "unknown"
+
+def _safe_sector(trade) -> str:
+    explicit = getattr(trade, "sector", "") or str(getattr(trade, "scores", {}).get("sector", "") or "")
+    if explicit:
+        return explicit
+    asset = getattr(trade, "asset", "") or asset_from_symbol(getattr(trade, "symbol", ""))
+    return sector_for_asset(asset)
+
+
 def _safe_exit_profile(trade) -> str:
     explicit = getattr(trade, "exit_profile", "") or str(getattr(trade, "scores", {}).get("exit_profile", "") or "")
     if explicit:
@@ -69,6 +84,31 @@ def _safe_dispersion_value(trade) -> float:
         return float(scores.get("dispersion_value", 0.0) or 0.0)
     except Exception:
         return 0.0
+
+
+def _safe_score_text(trade, key: str, default: str = "unknown") -> str:
+    explicit = getattr(trade, key, "") or ""
+    if explicit:
+        return str(explicit)
+    scores = getattr(trade, "scores", {}) or {}
+    value = scores.get(key, default)
+    return str(value or default)
+
+
+def _safe_market_risk_state(trade) -> str:
+    return _safe_score_text(trade, "market_risk_on_state")
+
+
+def _safe_market_rotation_state(trade) -> str:
+    return _safe_score_text(trade, "market_rotation_state")
+
+
+def _safe_market_btc_trend(trade) -> str:
+    return _safe_score_text(trade, "market_btc_trend")
+
+
+def _safe_market_eth_btc_trend(trade) -> str:
+    return _safe_score_text(trade, "market_eth_btc_trend")
 
 
 def _infer_regime(scores: dict) -> str:
@@ -119,8 +159,22 @@ def summarize_grouped(trade_log: list, key_fn: Callable[[object], str], min_trad
 
 def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
     by_sleeve = summarize_grouped(trade_log, lambda t: _safe_sleeve(t), min_trades=min_trades)
+    by_setup_type = summarize_grouped(trade_log, lambda t: _safe_setup_type(t), min_trades=min_trades)
+    by_sector = summarize_grouped(trade_log, lambda t: _safe_sector(t), min_trades=min_trades)
     by_exit_profile = summarize_grouped(trade_log, lambda t: _safe_exit_profile(t), min_trades=min_trades)
     by_dispersion_state = summarize_grouped(trade_log, lambda t: _safe_dispersion_state(t), min_trades=min_trades)
+    by_market_risk_state = summarize_grouped(trade_log, lambda t: _safe_market_risk_state(t), min_trades=min_trades)
+    by_market_rotation_state = summarize_grouped(trade_log, lambda t: _safe_market_rotation_state(t), min_trades=min_trades)
+    by_market_context = summarize_grouped(
+        trade_log,
+        lambda t: f"{_safe_market_risk_state(t)}|{_safe_market_rotation_state(t)}",
+        min_trades=min_trades,
+    )
+    by_market_btc_ethbtc = summarize_grouped(
+        trade_log,
+        lambda t: f"{_safe_market_btc_trend(t)}|{_safe_market_eth_btc_trend(t)}",
+        min_trades=min_trades,
+    )
     by_regime = summarize_grouped(trade_log, lambda t: getattr(t, "regime", "") or "unknown", min_trades=min_trades)
     by_side = summarize_grouped(trade_log, lambda t: getattr(t, "direction", "") or "unknown", min_trades=min_trades)
     by_regime_side = summarize_grouped(
@@ -153,11 +207,22 @@ def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
         lambda t: f"{_safe_sleeve(t)}|{getattr(t, 'regime', '') or 'unknown'}|{getattr(t, 'direction', '') or 'unknown'}",
         min_trades=min_trades,
     )
+    by_setup_type_regime_side = summarize_grouped(
+        trade_log,
+        lambda t: f"{_safe_setup_type(t)}|{getattr(t, 'regime', '') or 'unknown'}|{getattr(t, 'direction', '') or 'unknown'}",
+        min_trades=min_trades,
+    )
 
     return {
         "by_sleeve": [asdict(r) for r in by_sleeve],
+        "by_setup_type": [asdict(r) for r in by_setup_type],
+        "by_sector": [asdict(r) for r in by_sector],
         "by_exit_profile": [asdict(r) for r in by_exit_profile],
         "by_dispersion_state": [asdict(r) for r in by_dispersion_state],
+        "by_market_risk_state": [asdict(r) for r in by_market_risk_state],
+        "by_market_rotation_state": [asdict(r) for r in by_market_rotation_state],
+        "by_market_context": [asdict(r) for r in by_market_context],
+        "by_market_btc_ethbtc": [asdict(r) for r in by_market_btc_ethbtc],
         "by_regime": [asdict(r) for r in by_regime],
         "by_side": [asdict(r) for r in by_side],
         "by_regime_side": [asdict(r) for r in by_regime_side],
@@ -166,13 +231,18 @@ def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
         "by_regime_dispersion_state": [asdict(r) for r in by_regime_dispersion_state],
         "by_exit_profile_regime_side": [asdict(r) for r in by_exit_profile_regime_side],
         "by_sleeve_regime_side": [asdict(r) for r in by_sleeve_regime_side],
+        "by_setup_type_regime_side": [asdict(r) for r in by_setup_type_regime_side],
         "headline": {
             "best_sleeve": by_sleeve[0].key if by_sleeve else None,
             "worst_sleeve": by_sleeve[-1].key if by_sleeve else None,
+            "best_setup_type": by_setup_type[0].key if by_setup_type else None,
+            "worst_setup_type": by_setup_type[-1].key if by_setup_type else None,
             "best_exit_profile": by_exit_profile[0].key if by_exit_profile else None,
             "worst_exit_profile": by_exit_profile[-1].key if by_exit_profile else None,
             "best_dispersion_state": by_dispersion_state[0].key if by_dispersion_state else None,
             "worst_dispersion_state": by_dispersion_state[-1].key if by_dispersion_state else None,
+            "best_market_context": by_market_context[0].key if by_market_context else None,
+            "worst_market_context": by_market_context[-1].key if by_market_context else None,
         },
     }
 
@@ -187,6 +257,14 @@ def compact_lines(report: dict, top_n: int = 3) -> list[str]:
             pf_str = "inf" if pf == float("inf") else f"{pf:.2f}"
             parts.append(f'{row["key"]}:{row["win_rate"]:.0%}/{pf_str}/{row["net_pnl_usd"]:+.1f}')
         lines.append("Sleeves  " + "  ".join(parts))
+    setup_rows = report.get("by_setup_type", [])[:top_n]
+    if setup_rows:
+        parts = []
+        for row in setup_rows:
+            pf = row["profit_factor"]
+            pf_str = "inf" if pf == float("inf") else f"{pf:.2f}"
+            parts.append(f'{row["key"]}:{row["trades"]}t/{pf_str}')
+        lines.append("Setups   " + "  ".join(parts))
     regime_side_rows = report.get("by_regime_side", [])[:top_n]
     if regime_side_rows:
         parts = []
@@ -195,6 +273,14 @@ def compact_lines(report: dict, top_n: int = 3) -> list[str]:
             pf_str = "inf" if pf == float("inf") else f"{pf:.2f}"
             parts.append(f'{row["key"]}:{row["trades"]}t/{pf_str}')
         lines.append("RegSide  " + "  ".join(parts))
+    market_rows = report.get("by_market_context", [])[:top_n]
+    if market_rows:
+        parts = []
+        for row in market_rows:
+            pf = row["profit_factor"]
+            pf_str = "inf" if pf == float("inf") else f"{pf:.2f}"
+            parts.append(f'{row["key"]}:{row["trades"]}t/{pf_str}')
+        lines.append("Market   " + "  ".join(parts))
     exit_rows = report.get("by_exit_profile", [])[:top_n]
     if exit_rows:
         parts = []

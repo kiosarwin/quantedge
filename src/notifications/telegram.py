@@ -77,6 +77,8 @@ class TelegramNotifier:
         self._token: str = (os.getenv("TELEGRAM_TOKEN") or tg.get("token", "")).strip()
         self._chat_id: str = str(os.getenv("TELEGRAM_CHAT_ID") or tg.get("chat_id", "")).strip()
         self._enabled: bool = bool(self._token and self._chat_id)
+        raw_parse_mode = str(tg.get("parse_mode", "") or "").strip()
+        self._parse_mode: str = "" if raw_parse_mode.lower() in {"", "none", "plain", "text"} else raw_parse_mode
         self._url = _BASE.format(token=self._token)
         self._photo_url = _PHOTO_BASE.format(token=self._token)
 
@@ -925,6 +927,65 @@ class TelegramNotifier:
         ]
         await self._send("\n".join(lines))
 
+    async def crypto_news_report(
+        self,
+        items: list,
+        *,
+        interval_minutes: float = 60.0,
+    ) -> None:
+        """Separate market-narrative report, sent on its own cadence."""
+        if not self._enabled or not items:
+            return
+        now = datetime.now(UTC).strftime("%H:%M:%S UTC")
+        lines = [
+            "🔥 *MARKET HOT NARRATIVE — TOP 5*",
+            f"`{now}`",
+            f"`Cadence: {interval_minutes:.0f}m`",
+            "══════════════════════",
+        ]
+        for idx, item in enumerate(items[:5], start=1):
+            title = str(getattr(item, "title", "") or "").strip()
+            if not title:
+                continue
+            bias = str(getattr(item, "bias", "mixed") or "mixed").strip().upper()
+            source = str(getattr(item, "source", "rule") or "rule").strip()
+            score = self._safe_float(getattr(item, "urgency_score", 0.0))
+            confidence = self._safe_float(getattr(item, "confidence", 0.0))
+            explanation = str(getattr(item, "explanation", "") or "").strip()
+            evidence = list(getattr(item, "evidence", ()) or ())[:2]
+            recommended = [
+                str(coin or "").strip().upper()
+                for coin in list(getattr(item, "recommended_altcoins", ()) or ())[:5]
+                if str(coin or "").strip()
+            ]
+            rec_reason = str(getattr(item, "recommendation_reason", "") or "").strip()
+            block = [
+                f"{idx}. {title}",
+                f"   Bias: `{bias}`  Heat `{score:.1f}`  Conf `{confidence:.2f}`  Source `{source}`",
+            ]
+            if recommended:
+                block.append(f"   Buy watchlist: `{', '.join(recommended)}`")
+                if rec_reason:
+                    block.append(f"   Buy thesis: {rec_reason}")
+            else:
+                block.append("   Buy watchlist: `WAIT / NO CLEAR ALTCOIN BUY`")
+                if rec_reason:
+                    block.append(f"   Reason: {rec_reason}")
+            if explanation:
+                block.append(f"   Why: {explanation}")
+            for ev_idx, headline in enumerate(evidence, start=1):
+                headline = str(headline or "").strip()
+                if headline:
+                    block.append(f"   Evidence {ev_idx}: {headline}")
+            lines.append("\n".join(block))
+        if len(lines) <= 4:
+            return
+        lines.extend([
+            "══════════════════════",
+            "_Narrative-driven altcoin watchlist from fresh headlines. Not financial advice; verify liquidity, chart, and risk before buying._",
+        ])
+        await self._send("\n".join(lines))
+
     async def startup(self, mode: str, equity: float) -> None:
         if not self._enabled:
             return
@@ -1167,6 +1228,19 @@ class TelegramNotifier:
             msg += f"─────────────────────\n🧭 *By Sleeve:*{sleeve_lines}\n"
         else:
             msg += f"─────────────────────\n🧭 *By Sleeve:* _none_\n"
+        market_rows = attribution.get("by_market_context", [])[:3]
+        if market_rows:
+            market_lines = ""
+            for row in market_rows:
+                pf_val = self._safe_float(row.get("profit_factor", 0.0))
+                pf_str = "inf" if pf_val == float("inf") else f"{pf_val:.2f}"
+                market_lines += (
+                    f"\n   `{row.get('key', '?')}`: {self._safe_float(row.get('win_rate', 0)):.0%} WR  "
+                    f"PF {pf_str}  ${self._safe_float(row.get('net_pnl_usd', 0)):+.2f}  ({self._safe_int(row.get('trades', 0))})"
+                )
+            msg += f"─────────────────────\n🌐 *By Market:*{market_lines}\n"
+        else:
+            msg += f"─────────────────────\n🌐 *By Market:* _none_\n"
         exit_rows = attribution.get("by_exit_profile", [])[:3]
         if exit_rows:
             exit_lines = ""
@@ -1266,20 +1340,29 @@ class TelegramNotifier:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
                 for chunk in self._split_message(text):
-                    resp = await client.post(
-                        self._url,
-                        json={
-                            "chat_id": self._chat_id,
-                            "text": chunk,
-                            "parse_mode": "Markdown",
-                            "disable_web_page_preview": True,
-                        },
-                    )
+                    payload = {
+                        "chat_id": self._chat_id,
+                        "text": chunk,
+                        "disable_web_page_preview": True,
+                    }
+                    if self._parse_mode:
+                        payload["parse_mode"] = self._parse_mode
+
+                    resp = await client.post(self._url, json=payload)
                     if resp.status_code == 200:
                         continue
 
+                    if not self._parse_mode:
+                        log.warning(
+                            "Telegram send failed: %s %s",
+                            resp.status_code,
+                            resp.text[:200],
+                        )
+                        continue
+
                     log.warning(
-                        "Telegram send failed with Markdown: %s %s",
+                        "Telegram send failed with %s: %s %s",
+                        self._parse_mode,
                         resp.status_code,
                         resp.text[:200],
                     )
@@ -1546,7 +1629,7 @@ class TelegramNotifier:
         fig, (ax, ax_dd) = plt.subplots(
             2,
             1,
-            figsize=(10, 6.2),
+            figsize=(11, 6.8),
             dpi=160,
             sharex=True,
             gridspec_kw={"height_ratios": [3, 1]},
@@ -1554,6 +1637,7 @@ class TelegramNotifier:
         fig.patch.set_facecolor("#0f172a")
         ax.set_facecolor("#0f172a")
         ax_dd.set_facecolor("#0f172a")
+        fig.subplots_adjust(left=0.08, right=0.97, top=0.82, bottom=0.10, hspace=0.12)
 
         ax.plot(timestamps, balances, color="#38bdf8", linewidth=2.2, label="Balance")
         ax.plot(timestamps, equities, color="#a78bfa", linewidth=2.2, label="Equity")
@@ -1565,21 +1649,21 @@ class TelegramNotifier:
         latest_equity = equities[-1]
         floating = latest_equity - latest_balance
         latest_drawdown = drawdowns[-1] if drawdowns else 0.0
-        ax.set_title("Balance vs Equity", fontsize=15, pad=12, weight="bold")
-        ax.text(
-            0.01,
-            0.98,
-            f"Mode: {mode.upper()}  |  Cycle: #{cycle_num}  |  Cadence: {interval_minutes:.0f}m",
-            transform=ax.transAxes,
+        fig.suptitle("Balance vs Equity", fontsize=16, y=0.965, weight="bold", color="#f8fafc")
+        fig.text(
+            0.08,
+            0.925,
+            f"Mode: {mode.upper()}  |  Cycle: #{cycle_num}  |  Cadence: {interval_minutes:.0f}m  |  Samples: {len(points)}",
+            ha="left",
             va="top",
             fontsize=9,
             color="#cbd5e1",
         )
-        ax.text(
-            0.01,
-            0.91,
-            f"Latest Balance ${latest_balance:,.2f}  |  Equity ${latest_equity:,.2f}  |  Floating {floating:+.2f}",
-            transform=ax.transAxes,
+        fig.text(
+            0.08,
+            0.895,
+            f"Balance ${latest_balance:,.2f}  |  Equity ${latest_equity:,.2f}  |  Floating {floating:+.2f}  |  Drawdown {latest_drawdown:.1f}%",
+            ha="left",
             va="top",
             fontsize=9,
             color="#cbd5e1",
@@ -1590,10 +1674,11 @@ class TelegramNotifier:
         ax_dd.scatter([timestamps[-1]], [latest_drawdown], color="#fb7185", s=24, zorder=5)
         ax_dd.set_ylabel("DD %", fontsize=9, color="#cbd5e1")
         ax_dd.text(
-            0.01,
+            0.99,
             0.82,
             f"Latest DD {latest_drawdown:.1f}%",
             transform=ax_dd.transAxes,
+            ha="right",
             va="top",
             fontsize=9,
             color="#cbd5e1",
@@ -1606,7 +1691,7 @@ class TelegramNotifier:
         ax_dd.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
         ax.grid(True, alpha=0.18)
         ax_dd.grid(True, alpha=0.18)
-        ax.legend(loc="upper left", frameon=False)
+        ax.legend(loc="upper right", frameon=False)
         ax_dd.legend(loc="upper left", frameon=False)
         ax.tick_params(colors="#e2e8f0")
         ax_dd.tick_params(colors="#e2e8f0")
@@ -1616,7 +1701,6 @@ class TelegramNotifier:
             spine.set_color("#334155")
 
         buf = BytesIO()
-        fig.tight_layout()
         fig.savefig(buf, format="png", bbox_inches="tight", facecolor=fig.get_facecolor())
         plt.close(fig)
         buf.seek(0)

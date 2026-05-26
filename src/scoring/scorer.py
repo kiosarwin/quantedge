@@ -13,9 +13,12 @@ Final score is regime-gated and smart-money-gated.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+
+import pandas as pd
 
 from src.analysis.indicators import (
     trend_strength_score,
@@ -32,13 +35,29 @@ from src.analysis.order_book import order_book_score
 from src.analysis.sentiment import funding_sentiment_score, open_interest_score
 from src.analysis.smart_money import detect_smart_money, SmartMoneySignal, SmartMoneyPhase
 from src.analysis.short_strategies import detect_short_entry, ShortEntrySignal, ShortStrategy
+from src.analysis.mtf_price_action import (
+    detect_mtf_price_action_continuation,
+    MTFPriceActionSignal,
+)
+from src.analysis.vwap_pullback import (
+    detect_vwap_pullback_continuation,
+    VWAPPullbackSignal,
+)
+from src.analysis.liquidity_sweep_reversal import (
+    detect_liquidity_sweep_reversal,
+    LiquiditySweepReversalSignal,
+)
 from src.analysis.feature_engine import build_feature_vector, FeatureVector
 from src.analysis.spot_context import SpotContext, compute_spot_mult
 from src.models.ev_model import EVResult
 from src.models.pwin_engine import PwinContext
 from src.models.edge_detector import EdgeContext, EdgeResult
 from src.models.regime_classifier import classify_four_state, RegimeState
+from src.models.sector_rotation import SectorRotation, sector_rotation_score_mult
 from src.models.strategy_router import StrategyRouter, DispersionState
+from src.models.strategy_passport import asset_from_symbol, sector_for_asset
+from src.models.market_context import MarketContext, market_context_score_mult
+from src.models.time_series import TimeSeriesDiagnostics, time_series_directional_mult
 from src.data.market_data import MarketSnapshot
 
 if TYPE_CHECKING:
@@ -71,7 +90,13 @@ class SignalBreakdown:
     edge_result: EdgeResult | None = None
     feature_vector: FeatureVector | None = None
     spot_context: SpotContext | None = None
+    market_context: MarketContext | None = None
+    sector_rotation: SectorRotation | None = None
+    time_series: TimeSeriesDiagnostics | None = None
     short_setup: ShortEntrySignal | None = None
+    mtf_price_action: MTFPriceActionSignal | None = None
+    vwap_pullback: VWAPPullbackSignal | None = None
+    liquidity_sweep_reversal: LiquiditySweepReversalSignal | None = None
 
     weights_used: dict = field(default_factory=dict)
     strategy_sleeve: str = "neutral"
@@ -80,6 +105,14 @@ class SignalBreakdown:
     strategy_size_mult: float = 1.0
     strategy_threshold_shift: float = 0.0
     strategy_ranking_bonus: float = 0.0
+    probability_score_mult: float = 1.0
+    time_series_score_mult: float = 1.0
+    time_series_size_mult: float = 1.0
+    time_series_reason: str = ""
+    pre_gate_score: float = 0.0
+    setup_type: str = "none"
+    setup_quality_score: float = 0.0
+    setup_passport: object | None = None
     dispersion_value: float = 0.0
     dispersion_state: str = "normal"
     cohort_key: str = ""
@@ -152,6 +185,16 @@ class SignalBreakdown:
             ]
             if sc.coinbase_premium_pct != 0.0:
                 lines.append(f"  Coinbase Premium:  {sc.coinbase_premium_pct:+.3f}%")
+        if self.market_context:
+            mc = self.market_context
+            lines.append(
+                f"  Market Context:    {mc.risk_on_state} / {mc.rotation_state} (conf={mc.confidence:.2f})"
+            )
+        if self.time_series:
+            ts = self.time_series
+            lines.append(
+                f"  Time Series:       {ts.state} ewma_vol={ts.ewma_vol_pct:.3f}% shock_z={ts.latest_abs_return_z:.2f}"
+            )
         return "\n".join(lines)
 
 
@@ -189,18 +232,72 @@ class Scorer:
                 self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20),
             )
         )
-        min_trades = int(self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20))
         if ev_result.trade_count >= hard_gate_min_trades:
             return False
+        # The scorer has no strategy/session context. Keep generic paper EV
+        # relaxation non-negative here; contextual negative-EV exceptions live
+        # in NinjaTrader._paper_ev_relax_mode() high-conviction allowlists.
+        return float(ev_result.ev_net_pct or 0.0) >= 0.0
+
+    def _ev_gate_allows(self, ev_result: EVResult | None) -> bool:
+        ev_cfg = self._cfg.get("ev_model", {})
+        if not bool(ev_cfg.get("gate_enabled", True)):
+            return True
+        if ev_result is None:
+            return False
+
+        min_trades = int(ev_cfg.get("min_trades_for_ev", 20) or 20)
+        statistical_gate = bool(ev_cfg.get("statistical_gate_enabled", False))
+        if statistical_gate:
+            if ev_result.trade_count < min_trades:
+                return self._ev_bootstrap_enabled
+            return ev_result.is_tradeable
+
         if ev_result.trade_count < min_trades:
-            max_deficit = float(
-                paper_validation.get("ev_bootstrap_max_deficit_pct", 0.15) or 0.15
+            return (
+                self._ev_bootstrap_enabled
+                or ev_result.ev_net_pct > 0
+                or self._paper_soft_ev_allowed(ev_result)
             )
-        else:
-            max_deficit = float(
-                paper_validation.get("ev_probation_max_deficit_pct", 0.10) or 0.10
+        return ev_result.is_tradeable or self._paper_soft_ev_allowed(ev_result)
+
+    @staticmethod
+    def _bounded(value: float, lo: float, hi: float) -> float:
+        return min(hi, max(lo, float(value or 0.0)))
+
+    @staticmethod
+    def _clip_probability(value: float, default: float = 0.5) -> float:
+        try:
+            p = float(value)
+        except (TypeError, ValueError):
+            p = default
+        if not math.isfinite(p):
+            p = default
+        return min(0.99, max(0.01, p))
+
+    def _probabilistic_score_multiplier(self, ev_result: EVResult | None) -> float:
+        if ev_result is None:
+            return 1.0
+        p_win = self._clip_probability(getattr(ev_result, "p_win", 0.5))
+        confidence = self._bounded(float(getattr(ev_result, "confidence", 0.0) or 0.0), 0.0, 1.0)
+        conservative_p = float(getattr(ev_result, "conservative_p_win", 0.0) or 0.0)
+        posterior_p = p_win
+        if conservative_p > 0.0:
+            posterior_p = (
+                p_win * (1.0 - 0.35 * confidence)
+                + self._clip_probability(conservative_p) * (0.35 * confidence)
             )
-        return ev_result.ev_net_pct >= -max_deficit
+
+        ev_net = self._bounded(float(getattr(ev_result, "ev_net_pct", 0.0) or 0.0), -3.0, 3.0)
+        conservative_ev = self._bounded(
+            float(getattr(ev_result, "conservative_ev_net_pct", ev_net) or 0.0),
+            -3.0,
+            3.0,
+        )
+        probability_term = (posterior_p - 0.50) * 1.50   # Increased from 1.20
+        ev_term = math.tanh(ev_net / 1.0) * 0.25         # Increased from 0.18
+        conservative_term = math.tanh(conservative_ev / 1.0) * 0.15 * confidence # Increased from 0.10
+        return round(self._bounded(1.0 + probability_term + ev_term + conservative_term, 0.40, 1.25), 4) # Expanded range
 
     @property
     def edge_detector(self):
@@ -336,7 +433,6 @@ class Scorer:
         tf_cfg = self._cfg["timeframes"]
         primary_tf = tf_cfg["primary"]
         higher_tf = tf_cfg["higher"]
-
         df_primary = snapshot.candles_for(primary_tf)
         df_higher = snapshot.candles_for(higher_tf)
 
@@ -344,9 +440,70 @@ class Scorer:
             log.debug("Not enough candles for %s on %s", snapshot.symbol, primary_tf)
             return None
 
+        short_setup: ShortEntrySignal | None = None
+        try:
+            setup = detect_short_entry(df_primary, self._cfg)
+            if setup.is_valid:
+                short_setup = setup
+        except Exception as exc:
+            log.debug("Short setup detection failed for %s: %s", snapshot.symbol, exc)
+
         direction = trade_direction_from_structure(df_primary, self._cfg)
         if direction == "none" and not df_higher.empty and len(df_higher) >= 50:
             direction = trade_direction_from_structure(df_higher, self._cfg)
+
+        lower_tf = tf_cfg.get("lower") or tf_cfg.get("secondary") or tf_cfg.get("entry")
+        df_lower = snapshot.candles_for(lower_tf) if lower_tf else pd.DataFrame()
+        mtf_price_action: MTFPriceActionSignal | None = None
+        try:
+            mtf_signal = detect_mtf_price_action_continuation(
+                df_primary,
+                df_higher,
+                df_lower,
+                self._cfg,
+                direction_hint=direction,
+            )
+            if mtf_signal.is_valid:
+                mtf_price_action = mtf_signal
+                direction = mtf_signal.direction
+        except Exception as exc:
+            log.debug("MTF price-action detection failed for %s: %s", snapshot.symbol, exc)
+
+        vwap_pullback: VWAPPullbackSignal | None = None
+        try:
+            vwap_signal = detect_vwap_pullback_continuation(
+                df_primary,
+                df_higher,
+                self._cfg,
+                direction_hint=direction,
+            )
+            if vwap_signal.is_valid:
+                vwap_pullback = vwap_signal
+                direction = vwap_signal.direction
+        except Exception as exc:
+            log.debug("VWAP pullback detection failed for %s: %s", snapshot.symbol, exc)
+
+        liquidity_sweep_reversal: LiquiditySweepReversalSignal | None = None
+        try:
+            sweep_signal = detect_liquidity_sweep_reversal(
+                df_primary,
+                self._cfg,
+                direction_hint="none",
+            )
+            if sweep_signal.is_valid:
+                liquidity_sweep_reversal = sweep_signal
+                direction = sweep_signal.direction
+        except Exception as exc:
+            log.debug("Liquidity sweep reversal detection failed for %s: %s", snapshot.symbol, exc)
+
+        if short_setup is not None and direction != "short":
+            log.debug(
+                "%s dedicated short setup %s overrides structure direction=%s",
+                snapshot.symbol,
+                short_setup.label,
+                direction,
+            )
+            direction = "short"
         if direction == "none":
             return None
 
@@ -465,21 +622,13 @@ class Scorer:
         # Detection runs only for short candidates and is purely informational
         # here — the StrategyRouter consumes `breakdown.short_setup` to decide
         # whether to admit the trade via the reversal sleeve.
-        short_setup: ShortEntrySignal | None = None
-        if direction == "short":
-            try:
-                setup = detect_short_entry(df_primary, self._cfg)
-                if setup.is_valid:
-                    short_setup = setup
-                    # Phase D / Liq Sweep encode the post-distribution
-                    # breakdown thesis themselves; if the regime classifier
-                    # tagged this candle as `distribution` and the dedicated
-                    # detector fires, the regime gate is no longer the right
-                    # blocker — the setup-specific structure is.
-                    if not regime_ok and regime.value == "distribution":
-                        regime_ok = True
-            except Exception as exc:
-                log.debug("Short setup detection failed for %s: %s", snapshot.symbol, exc)
+        if short_setup is not None:
+            # Phase D / Liq Sweep encode the post-distribution breakdown thesis
+            # themselves; if the regime classifier tagged this candle as
+            # `distribution` and the dedicated detector fires, the regime gate
+            # is no longer the right blocker — the setup-specific structure is.
+            if not regime_ok and regime.value == "distribution":
+                regime_ok = True
 
         # Smart-money alignment is normally enforced via OI / funding / sweeps,
         # but Phase D and Liq Sweep have their own price-structure thesis. When
@@ -500,11 +649,14 @@ class Scorer:
         try:
             sm_aligned = bool(sm_signal and sm_signal.aligns_with(direction))
             sm_phase_val = sm_signal.phase.value if sm_signal else "neutral"
+            asset = asset_from_symbol(snapshot.symbol)
+            sector = sector_for_asset(asset)
             pwin_ctx = PwinContext(
                 regime=regime.value,
                 sm_phase=sm_phase_val,
                 sm_aligned=sm_aligned,
                 direction=direction,
+                sector=sector,
                 structure_quality=float(sq),
                 volatility_score=float(vs),
                 trend_strength=float(ts),
@@ -516,16 +668,7 @@ class Scorer:
                 funding_rate=snapshot.funding_rate,
                 pwin_ctx=pwin_ctx,
             )
-            # Bootstrap EV only when paper mode is explicitly in exploration mode.
-            min_trades = self._cfg.get("ev_model", {}).get("min_trades_for_ev", 20)
-            if ev_result.trade_count < min_trades:
-                ev_ok = (
-                    self._ev_bootstrap_enabled
-                    or ev_result.ev_net_pct > 0
-                    or self._paper_soft_ev_allowed(ev_result)
-                )
-            else:
-                ev_ok = ev_result.is_tradeable or self._paper_soft_ev_allowed(ev_result)
+            ev_ok = self._ev_gate_allows(ev_result)
         except Exception as exc:
             log.debug("EV model failed for %s: %s", snapshot.symbol, exc)
             ev_ok = True
@@ -553,6 +696,7 @@ class Scorer:
         ) / total_weight
 
         raw_score += htf_bonus
+        pre_gate_score = round(min(100.0, max(0.0, raw_score)), 2)
 
         # Gate penalties: reduce score if institutional filters fail
         if not regime_ok:
@@ -601,6 +745,48 @@ class Scorer:
             except Exception:
                 pass
 
+        market_ctx = getattr(snapshot, "market_context", None)
+        if market_ctx is not None and raw_score > 0:
+            try:
+                market_mult, market_reason = market_context_score_mult(market_ctx, direction)
+                if market_mult != 1.0:
+                    raw_score *= market_mult
+                    log.debug(
+                        "%s market context mult %.3fx: %s",
+                        snapshot.symbol, market_mult, market_reason,
+                    )
+            except Exception:
+                pass
+
+        sector_rotation = getattr(snapshot, "sector_rotation", None)
+        if sector_rotation is not None and raw_score > 0:
+            try:
+                sector_mult, sector_reason = sector_rotation_score_mult(sector_rotation, direction)
+                if sector_mult != 1.0:
+                    raw_score *= sector_mult
+                    log.debug(
+                        "%s sector rotation mult %.3fx: %s",
+                        snapshot.symbol, sector_mult, sector_reason,
+                    )
+            except Exception:
+                pass
+
+        ts_diag = getattr(snapshot, "time_series", None)
+        ts_score_mult = 1.0
+        ts_size_mult = 1.0
+        ts_reason = ""
+        if ts_diag is not None and raw_score > 0:
+            try:
+                ts_score_mult, ts_size_mult, ts_reason = time_series_directional_mult(ts_diag, direction)
+                if ts_score_mult != 1.0:
+                    raw_score *= ts_score_mult
+                    log.debug(
+                        "%s time-series mult %.3fx size %.3fx: %s",
+                        snapshot.symbol, ts_score_mult, ts_size_mult, ts_reason,
+                    )
+            except Exception:
+                ts_score_mult, ts_size_mult, ts_reason = 1.0, 1.0, "time_series_failed"
+
         final_total = round(min(100.0, max(0.0, raw_score)), 2)
 
         # ── 6. Edge Detector (observer-only by default) ───────────────
@@ -648,12 +834,52 @@ class Scorer:
             ev_result=ev_result,
             feature_vector=fv,
             spot_context=spot_ctx,
+            market_context=market_ctx,
+            sector_rotation=sector_rotation,
+            time_series=ts_diag,
             short_setup=short_setup,
+            mtf_price_action=mtf_price_action,
+            vwap_pullback=vwap_pullback,
+            liquidity_sweep_reversal=liquidity_sweep_reversal,
             weights_used=dict(w),
             regime_ok=regime_ok,
             smart_money_ok=smart_money_ok,
             ev_ok=ev_ok,
+            time_series_score_mult=ts_score_mult,
+            time_series_size_mult=ts_size_mult,
+            time_series_reason=ts_reason,
+            pre_gate_score=pre_gate_score,
         )
+
+    def _binance_alpha_risk_adjustment(self, bd: SignalBreakdown) -> tuple[float, float, str]:
+        passport = getattr(bd, "setup_passport", None)
+        sector = str(getattr(passport, "sector", "") or sector_for_asset(asset_from_symbol(bd.symbol)))
+        if sector != "binance_alpha":
+            return 1.0, 1.0, ""
+
+        reasons: list[str] = []
+        score_mult = 1.0
+        size_mult = 1.0
+        setup_quality = float(getattr(bd, "setup_quality_score", 0.0) or 0.0)
+        participation = min(float(getattr(bd, "volume_confirmation", 0.0) or 0.0), float(getattr(bd, "open_interest", 0.0) or 0.0))
+        volatility = float(getattr(bd, "volatility", 0.0) or 0.0)
+
+        if setup_quality < 65.0:
+            score_mult *= 0.92
+            size_mult *= 0.85
+            reasons.append("quality<65")
+        if participation < 55.0:
+            score_mult *= 0.92
+            size_mult *= 0.85
+            reasons.append("participation<55")
+        if volatility >= 75.0:
+            score_mult *= 0.90
+            size_mult *= 0.75
+            reasons.append("volatility>=75")
+
+        if not reasons:
+            return 1.0, 1.0, ""
+        return score_mult, size_mult, "binance_alpha_risk=" + "+".join(reasons)
 
     def score_many(self, snapshots: dict[str, MarketSnapshot]) -> list[SignalBreakdown]:
         results = []
@@ -675,14 +901,23 @@ class Scorer:
             bd.strategy_sleeve = decision.sleeve
             bd.strategy_reason = decision.reason
             bd.strategy_score_mult = decision.score_mult
-            bd.strategy_size_mult = decision.size_mult
+            bd.strategy_size_mult = round(decision.size_mult * getattr(bd, "time_series_size_mult", 1.0), 4)
             bd.strategy_threshold_shift = decision.threshold_shift
             bd.strategy_ranking_bonus = decision.ranking_bonus
+            bd.probability_score_mult = self._probabilistic_score_multiplier(getattr(bd, "ev_result", None))
+            bd.setup_type = getattr(decision, "setup_type", "unknown")
+            bd.setup_quality_score = float(getattr(decision, "quality_score", 0.0) or 0.0)
+            bd.setup_passport = getattr(decision, "passport", None)
+            alpha_score_mult, alpha_size_mult, alpha_reason = self._binance_alpha_risk_adjustment(bd)
+            if alpha_reason:
+                bd.strategy_reason = f"{bd.strategy_reason}; {alpha_reason}" if bd.strategy_reason else alpha_reason
+                bd.strategy_score_mult = round(bd.strategy_score_mult * alpha_score_mult, 4)
+                bd.strategy_size_mult = round(bd.strategy_size_mult * alpha_size_mult, 4)
             bd.dispersion_value = dispersion.value
             bd.dispersion_state = dispersion.state
             bd.base_score = anchored_base
             bd.total_score = round(
-                min(100.0, max(0.0, anchored_base * decision.score_mult)),
+                min(100.0, max(0.0, anchored_base * bd.strategy_score_mult * bd.probability_score_mult)),
                 2,
             )
         results.sort(key=lambda x: x.total_score, reverse=True)

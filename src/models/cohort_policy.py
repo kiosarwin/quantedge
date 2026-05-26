@@ -16,8 +16,11 @@ priority-load tickers that have produced winning cohort samples recently.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Iterable
+
+from src.models.strategy_passport import sector_for_asset, asset_from_symbol
 
 log = logging.getLogger(__name__)
 
@@ -73,10 +76,13 @@ class CohortPolicy:
             or self.DEFAULT_ALLOWED_SM_PHASES
         )
         self._long_only = bool(edge_cfg.get("long_only", False))
-
         # Local-history (per-pair) gate: block a pair that's bled three+ in a row.
         self._max_recent_pair_losses = int(edge_cfg.get("max_recent_pair_losses", 3) or 3)
         self._pair_history_window = int(edge_cfg.get("pair_history_window", 6) or 6)
+
+        # Sector-history gate: block a sector if it's bleeding.
+        self._max_recent_sector_losses = int(edge_cfg.get("max_recent_sector_losses", 2) or 2)
+        self._sector_history_window = int(edge_cfg.get("sector_history_window", 5) or 5)
 
         # Attribution gate: only fire when the cohort has reached `min_trades`
         # AND has unhealthy stats.
@@ -141,6 +147,11 @@ class CohortPolicy:
         if pair_block:
             return CohortDecision(False, pair_block, cohort_key=cohort_key)
 
+        # Sector-history gate.
+        sector_block = self._sector_history_block(breakdown, trade_log)
+        if sector_block:
+            return CohortDecision(False, sector_block, cohort_key=cohort_key)
+
         # Attribution-driven hard block.
         attr_match = self._best_attribution_match(breakdown, attribution_report)
         if attr_match and self._attribution_blocking(attr_match):
@@ -184,19 +195,61 @@ class CohortPolicy:
             return 0.0
         return self._attribution_bonus(breakdown, attribution_report)
 
-    def recommend_symbols(self, trade_log: Iterable) -> list[str]:
-        # Boost symbols that have produced positive expectancy in recent history.
-        scores: dict[str, float] = {}
-        for t in (trade_log or []):
+    def recommend_symbols(
+        self,
+        trade_log: Iterable,
+        primary_edge: dict | None = None,
+    ) -> list[str]:
+        # Boost symbols from the current primary edge first, then fall back to
+        # pair-level positive expectancy. This keeps scanner attention on the
+        # strategy cohort the lifecycle manager is trying to validate/promote.
+        trades = list(trade_log or [])
+        edge_key = str((primary_edge or {}).get("key", "") or "")
+        edge_buckets: dict[str, list[float]] = {}
+        pair_buckets: dict[str, list[float]] = {}
+
+        for t in trades:
             sym = getattr(t, "symbol", None)
             if not sym:
                 continue
-            scores[sym] = scores.get(sym, 0.0) + float(getattr(t, "pnl_usd", 0.0) or 0.0)
-        ranked = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        # Keep up to 8 priority symbols, only positive-pnl pairs.
-        return [s for s, score in ranked if score > 0][:8]
+            pnl = float(getattr(t, "pnl_usd", 0.0) or 0.0)
+            if self._trade_has_alpha_context(t):
+                pair_buckets.setdefault(sym, []).append(pnl)
+            if edge_key and self._trade_primary_edge_key(t) == edge_key:
+                edge_buckets.setdefault(sym, []).append(pnl)
+
+        edge_scores = {sym: self._priority_score(pnls) for sym, pnls in edge_buckets.items()}
+        pair_scores = {sym: self._priority_score(pnls) for sym, pnls in pair_buckets.items()}
+        ranked_edge = sorted(edge_scores.items(), key=lambda x: x[1], reverse=True)
+        ranked_pairs = sorted(pair_scores.items(), key=lambda x: x[1], reverse=True)
+
+        priority: list[str] = []
+        for sym, score in ranked_edge:
+            if score > 0 and sym not in priority:
+                priority.append(sym)
+        for sym, score in ranked_pairs:
+            if score > 0 and sym not in priority:
+                priority.append(sym)
+        return priority[:8]
 
     # ============================================================ internals
+
+    @staticmethod
+    def _priority_score(pnls: list[float]) -> float:
+        if not pnls:
+            return 0.0
+        n = len(pnls)
+        net = sum(float(p or 0.0) for p in pnls)
+        if net <= 0.0:
+            return 0.0
+        wins = sum(1 for p in pnls if float(p or 0.0) > 0.0)
+        alpha = wins + 1.0
+        beta = (n - wins) + 1.0
+        mean = alpha / (alpha + beta)
+        variance = (alpha * beta) / (((alpha + beta) ** 2) * (alpha + beta + 1.0))
+        lower = max(0.0, mean - math.sqrt(max(0.0, variance)))
+        sample_confidence = min(1.0, math.sqrt(float(n)) / 2.0)
+        return net * (0.5 + lower) * sample_confidence
 
     @staticmethod
     def _cohort_key(breakdown) -> str:
@@ -204,7 +257,25 @@ class CohortPolicy:
         regime_obj = getattr(breakdown, "regime", None)
         regime = getattr(regime_obj, "value", "") if regime_obj else "unknown"
         side = getattr(breakdown, "direction", "") or "unknown"
+        setup_type = getattr(breakdown, "setup_type", "") or ""
+        if setup_type in {"mtf_price_action_continuation", "vwap_pullback_continuation", "liquidity_sweep_reversal"}:
+            return f"{setup_type}|{regime}|{side}"
         return f"{sleeve}|{regime}|{side}"
+
+    @staticmethod
+    def _trade_primary_edge_key(trade) -> str:
+        sleeve = getattr(trade, "strategy_sleeve", "") or "unknown"
+        regime = getattr(trade, "regime", "") or "unknown"
+        scores = getattr(trade, "scores", {}) or {}
+        sm_phase = scores.get("sm_phase", "neutral") or "neutral"
+        session = scores.get("session", "unknown") or "unknown"
+        direction = getattr(trade, "direction", "") or "unknown"
+        return f"{sleeve}|{regime}|{sm_phase}|{session}|{direction}"
+
+    def _trade_has_alpha_context(self, trade) -> bool:
+        sleeve = getattr(trade, "strategy_sleeve", "") or "unknown"
+        regime = getattr(trade, "regime", "") or "unknown"
+        return sleeve in self._allowed_sleeves and regime in self._allowed_regimes
 
     def _pair_history_block(self, breakdown, trade_log: Iterable) -> str:
         sym = getattr(breakdown, "symbol", "") or ""
@@ -222,20 +293,54 @@ class CohortPolicy:
             return f"negative cohort: {losses}/{len(recent)} recent losses on {sym}"
         return ""
 
+    def _sector_history_block(self, breakdown, trade_log: Iterable) -> str:
+        sym = getattr(breakdown, "symbol", "") or ""
+        asset = asset_from_symbol(sym)
+        sector = sector_for_asset(asset)
+        if sector == "other":
+            return ""
+        recent = [
+            t for t in (trade_log or [])
+            if (getattr(t, "sector", "") or sector_for_asset(getattr(t, "asset", ""))) == sector
+        ]
+        if not recent:
+            return ""
+        recent = recent[-self._sector_history_window :]
+        losses = sum(1 for t in recent if float(getattr(t, "pnl_usd", 0.0) or 0.0) <= 0)
+        if losses >= self._max_recent_sector_losses:
+            return f"negative sector momentum: {losses}/{len(recent)} recent losses in {sector}"
+        return ""
+
     def _best_attribution_match(self, breakdown, report) -> dict | None:
         if not report:
             return None
-        target_key = self._cohort_key(breakdown)
-        for row in report.get("by_sleeve_regime_side", []) or []:
-            if row.get("key") == target_key:
-                return row
         # Fall back to coarser groupings.
         sleeve = getattr(breakdown, "strategy_sleeve", "") or "neutral"
         regime_obj = getattr(breakdown, "regime", None)
         regime = getattr(regime_obj, "value", "") if regime_obj else ""
         side = getattr(breakdown, "direction", "") or ""
+        sym = getattr(breakdown, "symbol", "") or ""
+        asset = asset_from_symbol(sym)
+        sector = sector_for_asset(asset)
+
+        setup_type = getattr(breakdown, "setup_type", "") or ""
+        if setup_type:
+            setup_key = f"{setup_type}|{regime}|{side}"
+            for row in report.get("by_setup_type_regime_side", []) or []:
+                if row.get("key") == setup_key:
+                    return row
+            if setup_type in {"mtf_price_action_continuation", "vwap_pullback_continuation", "liquidity_sweep_reversal"}:
+                return None
+
+        target_key = f"{sleeve}|{regime}|{side}"
+        for row in report.get("by_sleeve_regime_side", []) or []:
+            if row.get("key") == target_key:
+                return row
         for row in report.get("by_regime_side", []) or []:
             if row.get("key") == f"{regime}|{side}":
+                return row
+        for row in report.get("by_sector", []) or []:
+            if row.get("key") == sector:
                 return row
         for row in report.get("by_sleeve", []) or []:
             if row.get("key") == sleeve:

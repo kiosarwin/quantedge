@@ -39,10 +39,29 @@ def test_notifier_strips_env_values(monkeypatch):
     assert notifier._enabled is True
 
 
-def test_notifier_falls_back_to_plain_text(monkeypatch):
+
+def test_notifier_sends_plain_text_by_default(monkeypatch):
     monkeypatch.setenv("TELEGRAM_TOKEN", "token")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
     notifier = TelegramNotifier({"telegram": {}})
+
+    calls = []
+    responses = [_FakeResponse(200, '{"ok":true}')]
+
+    monkeypatch.setattr(
+        "src.notifications.telegram.httpx.AsyncClient",
+        lambda timeout: _FakeAsyncClient(responses, calls),
+    )
+
+    asyncio.run(notifier.send_raw("trend_following on BTC/USDT"))
+
+    assert len(calls) == 1
+    assert "parse_mode" not in calls[0][1]
+
+def test_notifier_falls_back_to_plain_text(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_TOKEN", "token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "12345")
+    notifier = TelegramNotifier({"telegram": {"parse_mode": "Markdown"}})
 
     calls = []
     responses = [
@@ -142,6 +161,17 @@ def test_performance_report_uses_fund_manager_header(monkeypatch):
                 "ml_accuracy": 0.57,
                 "ml_trend": "stable",
                 "kelly_factor": 1.0,
+                "attribution": {
+                    "by_market_context": [
+                        {
+                            "key": "risk_on_alts|alts_outperforming",
+                            "win_rate": 0.67,
+                            "profit_factor": 1.8,
+                            "net_pnl_usd": 1.25,
+                            "trades": 3,
+                        }
+                    ]
+                },
             },
             equity=80.99,
             mode="paper",
@@ -150,6 +180,8 @@ def test_performance_report_uses_fund_manager_header(monkeypatch):
 
     assert "JIM SIMONS — FUND MANAGER REPORT" in sent["message"]
     assert "Mode: 📋 PAPER" in sent["message"]
+    assert "🌐 *By Market:*" in sent["message"]
+    assert "risk_on_alts|alts_outperforming" in sent["message"]
 
 
 def test_performance_report_shows_empty_open_positions(monkeypatch):
@@ -186,6 +218,7 @@ def test_performance_report_shows_empty_open_positions(monkeypatch):
     assert "📌 *Open Positions:* _none_" in sent["message"]
     assert "🧭 *By Sleeve:* _none_" in sent["message"]
     assert "🎯 *By Exit:* _none_" in sent["message"]
+    assert "🌐 *By Market:* _none_" in sent["message"]
     assert "🧾 *Recent Executions:* _none_" in sent["message"]
 
 

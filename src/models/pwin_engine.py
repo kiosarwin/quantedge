@@ -27,6 +27,7 @@ class PwinContext:
     sm_phase: str = "neutral"
     sm_aligned: bool = False
     direction: str = "long"
+    sector: str = "unknown"
     structure_quality: float = 50.0
     volatility_score: float = 50.0
     trend_strength: float = 50.0

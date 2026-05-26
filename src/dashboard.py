@@ -44,6 +44,12 @@ def _color_score(score: float, threshold: float) -> str:
     return "white"
 
 
+def _pf_for_display(pf: float) -> str:
+    if pf == 0.0:
+        return "N/A"
+    return "∞" if pf == float("inf") else f"{pf:.2f}"
+
+
 def build_header(state: dict) -> Panel:
     mode = state.get("mode", "?").upper()
     equity = state.get("equity", 0)
@@ -264,6 +270,58 @@ def build_lifecycle(state: dict) -> Panel:
     return Panel(tbl, title="[bold]Lifecycle[/bold]", border_style="red")
 
 
+def build_cohort_expectancy(state: dict) -> Panel:
+    lifecycle = state.get("lifecycle", {})
+    cohorts = lifecycle.get("cohorts", []) or []
+    if not cohorts:
+        return Panel(
+            "[dim]Cohort expectancy — need more closed trades[/dim]",
+            title="[bold]Cohort Expectancy[/bold]",
+            border_style="green",
+        )
+
+    ranked = sorted(
+        cohorts,
+        key=lambda c: (
+            float(c.get("expectancy_usd", 0.0) or 0.0),
+            float(c.get("profit_factor", 0.0) or 0.0),
+            int(c.get("trades", 0) or 0),
+        ),
+        reverse=True,
+    )[:5]
+
+    tbl = Table(box=box.SIMPLE, show_header=True, header_style="bold")
+    tbl.add_column("Cohort", style="cyan")
+    tbl.add_column("N", justify="right")
+    tbl.add_column("WR", justify="right")
+    tbl.add_column("PF", justify="right")
+    tbl.add_column("Exp $", justify="right")
+    tbl.add_column("Status", justify="center")
+
+    for row in ranked:
+        wr = float(row.get("win_rate", 0.0) or 0.0)
+        pf = float(row.get("profit_factor", 0.0) or 0.0)
+        exp = float(row.get("expectancy_usd", 0.0) or 0.0)
+        status = str(row.get("status", "RESEARCH") or "RESEARCH")
+        status_style = {
+            "ACTIVE": "green",
+            "SMALL_LIVE": "green",
+            "PAPER_VALIDATION": "yellow",
+            "RESEARCH": "white",
+            "DISABLED": "red",
+        }.get(status, "white")
+        tbl.add_row(
+            row.get("key", "unknown"),
+            str(int(row.get("trades", 0) or 0)),
+            f"[{'green' if wr >= 0.5 else 'red'}]{wr:.0%}[/]",
+            f"[{'green' if pf >= 1.2 else 'red'}]{_pf_for_display(pf)}[/]",
+            f"[{'green' if exp >= 0 else 'red'}]{exp:+.2f}[/]",
+            f"[{status_style}]{status}[/]",
+        )
+
+    return Panel(tbl, title="[bold]Cohort Expectancy[/bold]", border_style="green")
+
+
 def build_layout(state: dict) -> Layout:
     layout = Layout()
     layout.split_column(
@@ -276,6 +334,7 @@ def build_layout(state: dict) -> Layout:
     )
     layout["right"].split_column(
         Layout(build_lifecycle(state), name="lifecycle"),
+        Layout(build_cohort_expectancy(state), name="cohort"),
         Layout(build_shadow(state), name="shadow"),
         Layout(build_attribution(state), name="attrib"),
     )

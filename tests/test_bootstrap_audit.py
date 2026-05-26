@@ -14,6 +14,8 @@ def _trade(
     tp1_hit: bool = False,
     dispersion_state: str = "normal",
     dispersion_value: float = 0.0,
+    market_risk_on_state: str = "mixed",
+    market_rotation_state: str = "mixed_rotation",
 ):
     return SimpleNamespace(
         symbol=symbol,
@@ -32,6 +34,12 @@ def _trade(
         timeframe="1h",
         entry_reason="bootstrap sample",
         lifecycle_status="RESEARCH",
+        market_risk_on_state=market_risk_on_state,
+        market_rotation_state=market_rotation_state,
+        scores={
+            "market_risk_on_state": market_risk_on_state,
+            "market_rotation_state": market_rotation_state,
+        },
     )
 
 
@@ -59,6 +67,15 @@ def test_bootstrap_audit_report_includes_direction_mix_session_matrix_and_edge_s
     lifecycle_report = {
         "counts": {"RESEARCH": 1, "PAPER_VALIDATION": 1, "SMALL_LIVE": 0, "ACTIVE": 0, "DEGRADED": 0, "DISABLED": 0},
         "recommendation": "PAPER_ONLY",
+        "primary_edge": {
+            "key": "reversal|distribution|liquidity_sweep|london|short",
+            "status": "PAPER_VALIDATION",
+            "validated": False,
+            "trades": 6,
+            "win_rate": 0.667,
+            "profit_factor": 1.8,
+            "expectancy_usd": 0.25,
+        },
     }
 
     report = build_bootstrap_audit_report(trades, lifecycle_report=lifecycle_report, edge_memory=edge_memory)
@@ -72,9 +89,13 @@ def test_bootstrap_audit_report_includes_direction_mix_session_matrix_and_edge_s
     assert "Edge memory: `12` samples" in joined
     assert "BCH/USDT:USDT" in joined
     assert "Cohorts:" in joined
+    assert "Primary edge:" in joined
+    assert "PAPER_VALIDATION" in joined
     assert "Cohort " in joined
     assert "Attribution sleeves:" in joined
     assert "Attribution dispersion:" in joined
+    assert "Attribution market:" in joined
+    assert "mixed|mixed_rotation" in joined
 
 
 def test_bootstrap_audit_report_marks_small_sample_bootstrap():
@@ -86,3 +107,4 @@ def test_bootstrap_audit_report_marks_small_sample_bootstrap():
 
     assert any("BOOTSTRAP" in line for line in lines)
     assert any("N `1`" in line for line in lines)
+    assert any("Primary edge: `_none yet_`" in line for line in lines)

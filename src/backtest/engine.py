@@ -10,17 +10,13 @@ For each bar on the primary timeframe:
 from __future__ import annotations
 
 import logging
-import time
 from dataclasses import dataclass, field
-from typing import Optional
 
 import pandas as pd
 
-from src.analysis.indicators import atr, trend_strength_score, volatility_score, volume_ratio, buy_volume_ratio, is_extreme_volatility
-from src.analysis.structure import structure_quality_score, trade_direction_from_structure
-from src.analysis.sentiment import funding_sentiment_score, open_interest_score
 from src.scoring.scorer import Scorer, SignalBreakdown
-from src.risk.risk_manager import RiskManager, TradeSetup
+from src.risk.risk_manager import RiskManager
+from src.data.market_data import MarketSnapshot
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +58,8 @@ class BacktestTrade:
     trailing_stop: float | None = None
     remaining_contracts: float = 0.0
     entry_score: float = 0.0
+    strategy_sleeve: str = "neutral"
+    setup_type: str = "unknown"
     mfe_r: float = 0.0   # max favorable excursion in R multiples
     mae_r: float = 0.0   # max adverse excursion in R multiples
 
@@ -179,9 +177,11 @@ class BacktestEngine:
         tf_cfg = self._cfg["timeframes"]
         primary_tf = tf_cfg["primary"]
         higher_tf = tf_cfg["higher"]
+        lower_tf = tf_cfg.get("lower") or tf_cfg.get("secondary") or tf_cfg.get("entry")
 
         df = candles.get(primary_tf)
         df_high = candles.get(higher_tf, pd.DataFrame())
+        df_lower = candles.get(lower_tf, pd.DataFrame()) if lower_tf else pd.DataFrame()
 
         if df is None or df.empty:
             log.warning("[%s] No primary candles", symbol)
@@ -204,6 +204,7 @@ class BacktestEngine:
             df_slice = df.iloc[:i]
             bar_ts = df.index[i]
             df_high_slice = df_high.loc[df_high.index < bar_ts] if not df_high.empty else df_high
+            df_lower_slice = df_lower.loc[df_lower.index < bar_ts] if not df_lower.empty else df_lower
 
             # ── Manage open trade ──────────────────────────────────────────
             if open_trade is not None:
@@ -225,14 +226,27 @@ class BacktestEngine:
 
             # ── Look for new entry ─────────────────────────────────────────
             if open_trade is None and self._risk.can_open_trade()[0]:
-                bd = self._score_bar(symbol, df_slice, df_high_slice)
+                bd = self._score_bar(symbol, df_slice, df_high_slice, df_lower_slice)
                 if bd and bd.total_score >= self._threshold:
                     # Apply slippage to entry
                     slip = bar_close * self._slippage_pct
                     entry_price = bar_close + slip if bd.direction == "long" else bar_close - slip
 
                     self._risk.update_equity(equity)
-                    setup = self._risk.calculate_setup(symbol, bd.direction, df_slice, entry_price)
+                    setup = self._risk.calculate_setup(
+                        symbol,
+                        bd.direction,
+                        df_slice,
+                        entry_price,
+                        strategy_sleeve=str(getattr(bd, "strategy_sleeve", "neutral") or "neutral"),
+                        ev_result=getattr(bd, "ev_result", None),
+                        setup_passport=(
+                            bd.setup_passport.as_dict()
+                            if getattr(bd, "setup_passport", None) is not None
+                            and hasattr(bd.setup_passport, "as_dict")
+                            else None
+                        ),
+                    )
                     if setup:
                         commission_entry = setup.size_usd * self._commission_pct
                         equity -= commission_entry
@@ -256,6 +270,8 @@ class BacktestEngine:
                             atr=float(setup.atr or 0.0),
                             remaining_contracts=setup.size_contracts,
                             entry_score=bd.total_score,
+                            strategy_sleeve=str(getattr(bd, "strategy_sleeve", "neutral") or "neutral"),
+                            setup_type=str(getattr(bd, "setup_type", "unknown") or "unknown"),
                         )
                         self._risk.on_trade_opened()
 
@@ -284,80 +300,35 @@ class BacktestEngine:
     # ------------------------------------------------------------------ #
 
     def _score_bar(
-        self, symbol: str, df: pd.DataFrame, df_high: pd.DataFrame
+        self,
+        symbol: str,
+        df: pd.DataFrame,
+        df_high: pd.DataFrame,
+        df_lower: pd.DataFrame | None = None,
     ) -> SignalBreakdown | None:
         if len(df) < _MIN_BARS:
             return None
 
-        # Order book and live signals not available in backtest → neutral (50)
-        class _FakeSnap:
-            pass
+        tf_cfg = self._cfg["timeframes"]
+        candles = {tf_cfg["primary"]: df, tf_cfg["higher"]: df_high}
+        lower_tf = tf_cfg.get("lower") or tf_cfg.get("secondary") or tf_cfg.get("entry")
+        if lower_tf:
+            candles[lower_tf] = df_lower if df_lower is not None else pd.DataFrame()
 
-        direction = trade_direction_from_structure(df, self._cfg)
-        if direction == "none":
-            if not df_high.empty and len(df_high) >= 50:
-                direction = trade_direction_from_structure(df_high, self._cfg)
-        if direction == "none":
-            return None
-
-        try:
-            ts = trend_strength_score(df, self._cfg)
-        except Exception:
-            ts = 0.0
-
-        try:
-            ind = self._cfg["indicators"]
-            vol_r = volume_ratio(df, ind["volume_lookback"])
-            buy_r = buy_volume_ratio(df, ind["volume_lookback"])
-            vol_score = min(100.0, vol_r / ind["volume_spike_multiplier"] * 50)
-            if direction == "long":
-                vol_score = vol_score * 0.5 + buy_r * 100 * 0.5
-            else:
-                vol_score = vol_score * 0.5 + (1 - buy_r) * 100 * 0.5
-        except Exception:
-            vol_score = 0.0
-
-        try:
-            sq = structure_quality_score(df, self._cfg)
-        except Exception:
-            sq = 0.0
-
-        oi_score = 50.0      # no historical OI
-        fs_score = 50.0      # no historical funding
-        ob_score = 50.0      # no historical order book
-
-        try:
-            vs = volatility_score(df, self._cfg)
-        except Exception:
-            vs = 50.0
-
-        w = self._scorer._weights
-        total_weight = sum(w.values()) or 1.0
-        raw_score = (
-            ts       * w.get("trend_strength", 20) +
-            vol_score * w.get("volume_confirmation", 15) +
-            sq       * w.get("structure_quality", 20) +
-            oi_score * w.get("open_interest", 15) +
-            fs_score * w.get("funding_sentiment", 10) +
-            ob_score * w.get("order_book", 10) +
-            vs       * w.get("volatility", 10)
-        ) / total_weight
-
-        final_score = round(raw_score, 2)
-        return SignalBreakdown(
+        snap = MarketSnapshot(
             symbol=symbol,
-            direction=direction,
-            total_score=final_score,
-            base_score=final_score,
-            trend_strength=ts,
-            volume_confirmation=vol_score,
-            structure_quality=sq,
-            open_interest=oi_score,
-            funding_sentiment=fs_score,
-            order_book=ob_score,
-            volatility=vs,
-            weights_used=dict(w),
+            candles=candles,
+            order_book={"bids": [], "asks": []},
+            funding_rate=0.0,
+            open_interest_usd=0.0,
+            oi_change_pct=0.0,
+            last_price=float(df["close"].iloc[-1]),
+            volume_24h_usdt=0.0,
+            ls_ratio=1.0,
+            taker_buy_ratio=0.5,
         )
+        scored = self._scorer.score_many({symbol: snap})
+        return scored[0] if scored else None
 
     # ------------------------------------------------------------------ #
     #  Exit logic (bar-level simulation)                                   #
