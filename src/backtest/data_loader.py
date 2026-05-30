@@ -33,7 +33,7 @@ _TF_MINUTES = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
 
 def _cache_path(symbol: str, tf: str, start: str, end: str) -> Path:
     safe = symbol.replace("/", "_").replace(":", "_")
-    return _CACHE_DIR / f"{safe}_{tf}_{start}_{end}.pkl"
+    return _CACHE_DIR / f"{safe}_{tf}_{start}_{end}.parquet"
 
 
 def generate_synthetic_ohlcv(
@@ -129,12 +129,12 @@ def _load_or_generate(
 
     if cache_file.exists():
         log.debug("Cache hit: %s", cache_file.name)
-        return pd.read_pickle(cache_file)
+        return pd.read_parquet(cache_file)
 
     log.info("Generating synthetic data for %s %s  %s → %s", symbol, timeframe, start_date, end_date)
     df = generate_synthetic_ohlcv(symbol, timeframe, start_date, end_date)
     try:
-        df.to_pickle(cache_file)
+        df.to_parquet(cache_file)
     except Exception as exc:
         log.debug("Cache save failed (non-fatal): %s", exc)
     log.info("Generated %d bars for %s %s", len(df), symbol, timeframe)
@@ -157,7 +157,7 @@ async def fetch_historical(
 
     if cache_file.exists():
         log.info("Cache hit: %s", cache_file.name)
-        return pd.read_pickle(cache_file)
+        return pd.read_parquet(cache_file)
 
     raw_sym = symbol.replace("/", "").replace(":USDT", "")  # BTC/USDT:USDT → BTCUSDT
     start_ms = int(pd.Timestamp(start_date, tz="UTC").timestamp() * 1000)
@@ -202,7 +202,7 @@ async def fetch_historical(
         df = df[df.index < pd.Timestamp(end_date, tz="UTC")]
 
         try:
-            df.to_pickle(cache_file)
+            df.to_parquet(cache_file)
         except Exception as exc:
             log.debug("Cache save failed (non-fatal): %s", exc)
 

@@ -1,0 +1,18 @@
+{
+  "id": "FEAT-001",
+  "type": "chore",
+  "description": "Environment setup: install dependencies and verify existing tests pass as a baseline",
+  "status": "completed",
+  "steps": [
+    "Install dependencies from requirements.txt using pip in the quantedge directory",
+    "Run python -m pytest tests/ -q to confirm baseline tests pass"
+  ],
+  "acceptance_criteria": [
+    "All existing tests pass without failure"
+  ],
+  "verification": [
+    "python -m pytest tests/ -q passes with 0 failures"
+  ],
+  "blocked_reason": null,
+  "findings": "All dependencies already installed. 396 tests pass (python -m pytest tests/ -q --ignore=tests/test_crypto_news.py). Pre-existing issue: tests/test_crypto_news.py fails to collect because it imports src.data.crypto_news which does not exist (introduced in commit 2630720 before our branch). Use --ignore=tests/test_crypto_news.py when running full suite, or pytest will abort with collection error. This test file references a module that was never created."
+}

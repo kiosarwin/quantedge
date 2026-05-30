@@ -62,6 +62,8 @@ class BacktestTrade:
     setup_type: str = "unknown"
     mfe_r: float = 0.0   # max favorable excursion in R multiples
     mae_r: float = 0.0   # max adverse excursion in R multiples
+    funding_cost: float = 0.0  # cumulative funding costs deducted
+    _last_funding_bar: int = 0  # bar index of last funding charge
 
     def current_pnl(self, price: float) -> float:
         mult = 1 if self.direction == "long" else -1
@@ -159,6 +161,14 @@ class BacktestEngine:
         self._slippage_pct = self._bt_cfg["slippage_pct"] / 100
         self._threshold = cfg["backtest"].get("score_threshold", cfg["trading"]["min_score_threshold"])
         self._safety = cfg.get("safety", {})
+        self._funding_rate_per_8h = self._bt_cfg.get("funding_rate_per_8h", 0.0001)  # 0.01% per 8h default
+
+    def _bars_per_8h(self) -> int:
+        """Number of bars in 8 hours based on primary timeframe."""
+        tf = self._cfg["timeframes"]["primary"]
+        tf_minutes = {"1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30,
+                      "1h": 60, "2h": 120, "4h": 240, "1d": 1440}.get(tf, 60)
+        return max(1, 480 // tf_minutes)  # 480 minutes = 8 hours
 
     def run(
         self,
@@ -219,10 +229,21 @@ class BacktestEngine:
                     open_trade.pnl_usd -= commission
                     equity += open_trade.pnl_usd
                     self._risk.on_trade_closed(open_trade.pnl_usd)
+                    # Include funding cost in per-trade PnL for reporting (already deducted from equity during trade)
+                    open_trade.pnl_usd -= open_trade.funding_cost
                     result.trades.append(open_trade)
                     result.equity_curve.append(equity)
                     open_trade = None
                     continue
+
+            # H11: Deduct funding costs for positions held across 8h boundaries
+            if open_trade is not None:
+                bars_8h = self._bars_per_8h()
+                if (i - open_trade._last_funding_bar) >= bars_8h:
+                    cost = open_trade.size_usd * self._funding_rate_per_8h
+                    open_trade.funding_cost += cost
+                    equity -= cost
+                    open_trade._last_funding_bar = i
 
             # ── Look for new entry ─────────────────────────────────────────
             if open_trade is None and self._risk.can_open_trade()[0]:
@@ -273,6 +294,7 @@ class BacktestEngine:
                             strategy_sleeve=str(getattr(bd, "strategy_sleeve", "neutral") or "neutral"),
                             setup_type=str(getattr(bd, "setup_type", "unknown") or "unknown"),
                         )
+                        open_trade._last_funding_bar = i
                         self._risk.on_trade_opened()
 
             result.equity_curve.append(equity)
@@ -289,6 +311,8 @@ class BacktestEngine:
             open_trade.exit_reason = "end_of_data"
             open_trade.exit_bar = len(df) - 1
             equity += open_trade.pnl_usd
+            # Include funding cost in per-trade PnL for reporting (already deducted from equity during trade)
+            open_trade.pnl_usd -= open_trade.funding_cost
             result.trades.append(open_trade)
             result.equity_curve.append(equity)
 

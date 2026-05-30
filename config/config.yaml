@@ -6,8 +6,7 @@
 exchange:
   name: binance_futures
   testnet: false                    # Paper mode uses live public market data; live orders still require mode=live
-  api_key: ""                      # Set via .env: BINANCE_API_KEY
-  api_secret: ""                   # Set via .env: BINANCE_API_SECRET
+  # Credentials: set BINANCE_API_KEY and BINANCE_API_SECRET in .env (never in this file)
   recv_window: 10000
   fapi_base_url: "https://fapi.binance.com"     # fapi1/2/3 blocked in ID; fapi.binance.com works
 
@@ -178,7 +177,7 @@ risk:
   risk_per_trade_pct: 1.5            # UPGRADED from 1.25 — more aggressive on validated edge
   max_risk_per_trade_pct: 2.5        # UPGRADED from 1.75 — Kelly can express up to 2.5%
   daily_loss_cap_pct: 5.0          # Paper sample collection cap; cooldown/streak halt disabled below
-  weekly_loss_cap_pct: 0.0         # Disabled in paper so valid samples are not frozen
+  weekly_loss_cap_pct: 10.0        # 10% weekly loss cap enforced
   max_drawdown_pct: 20.0           # TIGHTENED from 25% — earlier brake protects equity curve
   min_rr_ratio: 1.8                # LOWERED from 2.0 — allows high WR setups with 1.8R min
   max_leverage: 12                 # UPGRADED: allow up to 12x on high-conviction
@@ -187,8 +186,8 @@ risk:
   max_stop_distance_pct: 50.0       # Reject abnormal ATR stops/negative short TPs on microcaps
   min_notional_usd: 5.0            # Binance Futures minimum order notional
   min_risk_usd: 0.50               # Paper-account floor; lets Brain/FundManager scale-down matter on $70 equity
-  cooldown_after_loss_streak: 0    # Disabled by request: collect paper samples without streak cooldown
-  cooldown_minutes: 0              # Disabled by request: no cooldown during sample collection
+  cooldown_after_loss_streak: 5    # Pause after 5 consecutive losses
+  cooldown_minutes: 60             # 60-minute cooldown after loss streak
   max_symbol_risk_pct: 2.5         # Match max_risk_per_trade so single-symbol bets are not artificially capped
   max_sector_risk_pct: 2.5         # Sector limit: avoid correlated clusters (e.g. 3 AI coins at once)
   max_direction_risk_pct: 5.50     # Allow heavier directional concentration when conviction is high
@@ -500,7 +499,7 @@ telegram:
 safety:
   pause_on_extreme_volatility: true
   extreme_vol_atr_multiplier: 3.0
-  max_consecutive_losses: 0              # Disabled by request: no hard streak halt during paper sample collection
+  max_consecutive_losses: 5              # Hard halt after 5 consecutive losses
   api_retry_attempts: 3
   api_retry_delay_seconds: 5
   # Hang-storm protection (added 2026-05-22). Two-layer timeout on every

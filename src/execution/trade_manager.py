@@ -19,6 +19,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Awaitable
 
+from src.utils.atomic_write import atomic_write
+
 from src.data.client import BinanceFuturesClient
 from src.execution.executor import Executor
 from src.risk.risk_manager import RiskManager, TradeSetup
@@ -198,6 +200,17 @@ class TradeManager:
         except Exception as exc:
             log.error("[%s] Entry order failed — no position opened: %s", setup.symbol, exc)
             return None
+
+        # Adjust position size if entry was only partially filled
+        actual_filled = entry_order.get("actual_filled")
+        if actual_filled is not None and actual_filled < setup.size_contracts:
+            ratio = actual_filled / setup.size_contracts
+            log.warning(
+                "[%s] Partial fill: %.6f / %.6f contracts (%.1f%%) — adjusting SL/TP size",
+                setup.symbol, actual_filled, setup.size_contracts, ratio * 100,
+            )
+            setup.size_contracts = actual_filled
+            setup.size_usd = setup.size_usd * ratio
 
         fill_price = float(entry_order.get("price", setup.entry_price) or setup.entry_price)
         if fill_price == 0:
@@ -642,7 +655,7 @@ class TradeManager:
                 "trades": [self._serialize_trade(t) for t in self._trades.values()],
                 "updated_at": time.time(),
             }
-            self.STATE_PATH.write_text(json.dumps(payload))
+            atomic_write(self.STATE_PATH, json.dumps(payload))
         except Exception as exc:
             log.warning("Trade state save failed: %s", exc)
 

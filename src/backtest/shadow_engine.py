@@ -15,6 +15,8 @@ import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from src.utils.atomic_write import atomic_write
+
 from rich.console import Console
 from rich.table import Table
 
@@ -274,7 +276,7 @@ class ShadowEngine:
             "rejected": self._rejected,
         }
         try:
-            self._save_path.write_text(json.dumps(state, indent=2))
+            atomic_write(self._save_path, json.dumps(state, indent=2))
         except Exception as exc:
             log.warning("Shadow state save failed: %s", exc)
 

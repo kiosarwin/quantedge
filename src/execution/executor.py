@@ -4,6 +4,7 @@ Paper mode mirrors the logic but records fills without sending real orders.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import time
@@ -63,8 +64,47 @@ class Executor:
         order = await self._client.create_order(
             setup.symbol, "market", side, amount
         )
-        log.info("Entry order filled: %s", order.get("id"))
+        # Confirm fill in live mode
+        confirmed = await self._confirm_fill(setup.symbol, order.get("id", ""))
+        if confirmed is not None:
+            order = confirmed
+        if confirmed is None:
+            log.error("[%s] Entry order %s not confirmed/rejected", setup.symbol, order.get("id"))
+            raise RuntimeError(
+                f"{setup.symbol}: entry order {order.get('id')} rejected or unconfirmed"
+            )
+        # Track actual filled quantity for downstream SL/TP sizing
+        filled = float(order.get("filled", 0) or 0)
+        if filled > 0 and filled < amount:
+            order["actual_filled"] = filled
+        log.info("Entry order confirmed: %s", order.get("id"))
         return order
+
+    async def _confirm_fill(self, symbol: str, order_id: str, max_retries: int = 5) -> dict | None:
+        """Poll exchange for fill confirmation after live market order."""
+        for attempt in range(max_retries):
+            await asyncio.sleep(1.0)
+            try:
+                order = await self._client.fetch_order(order_id, symbol)
+            except Exception as exc:
+                log.warning("Fill check attempt %d/%d for %s failed: %s", attempt + 1, max_retries, order_id, exc)
+                continue
+            status = order.get("status", "")
+            if status == "closed":
+                # Check for partial fill
+                filled = float(order.get("filled", 0) or 0)
+                amount = float(order.get("amount", 0) or 0)
+                if 0 < filled < amount:
+                    log.warning(
+                        "Order %s partially filled: %.6f / %.6f on %s",
+                        order_id, filled, amount, symbol,
+                    )
+                return order
+            if status in ("canceled", "cancelled", "rejected", "expired"):
+                log.error("Order %s %s on %s: %s", order_id, status, symbol, order)
+                return None
+        log.warning("Order %s not confirmed after %d attempts on %s", order_id, max_retries, symbol)
+        return None
 
     async def place_stop_loss(self, setup: TradeSetup, order_id: str) -> dict:
         if self._paper:

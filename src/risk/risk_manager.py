@@ -234,6 +234,7 @@ class PortfolioState:
     drawdown_state: str = "normal"      # 'normal' | 'warning' | 'critical'
     recovery_mode: bool = False         # True when recovering from drawdown
     recovery_start_ts: float = 0.0      # when recovery mode began
+    recovery_start_equity: float = 0.0  # H2: equity at recovery start
     recovery_stage: int = 0             # 0-3, gradual re-entry stages
     peak_drawdown_pct: float = 0.0      # worst drawdown observed this cycle
     drawdown_enter_ts: float = 0.0      # when drawdown state escalated
@@ -295,8 +296,16 @@ class PortfolioState:
             # Recovery: gradual ramp-up
             if self.recovery_mode:
                 elapsed = time.time() - self.recovery_start_ts
-                # Stage 0: 60%, Stage 1: 70%, Stage 2: 85%, Stage 3: 100%
-                stage = min(3, int(elapsed / 3600))  # advance stage every hour
+                # H2 audit: require both time elapsed AND equity recovering 30% of drawdown per stage
+                time_stage = int(elapsed / 3600)  # minimum 1 hour per stage
+                # Equity recovery: what fraction of the drawdown has been reclaimed?
+                drawdown_at_start = self.peak_equity - self.recovery_start_equity if self.peak_equity > 0 else 0.0
+                equity_recovered = self.equity - self.recovery_start_equity if self.recovery_start_equity > 0 else 0.0
+                recovery_pct = equity_recovered / drawdown_at_start if drawdown_at_start > 0 else 1.0
+                # Each stage requires reclaiming 30% of the drawdown
+                equity_stage = int(recovery_pct / 0.30) if recovery_pct >= 0 else 0
+                # Advance only as far as BOTH conditions allow
+                stage = min(3, min(time_stage, equity_stage))
                 self.recovery_stage = stage
                 self.risk_budget_multiplier = [0.60, 0.70, 0.85, 1.00][stage]
                 if stage >= 3:
@@ -310,6 +319,7 @@ class PortfolioState:
         if prev_state in ("warning", "critical") and self.drawdown_state == "normal":
             self.recovery_mode = True
             self.recovery_start_ts = time.time()
+            self.recovery_start_equity = self.equity  # H2: track equity at recovery start
             self.recovery_stage = 0
             log.info("Entering recovery mode — risk budget at 60%%, ramping up over 3 hours")
 

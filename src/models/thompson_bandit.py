@@ -24,6 +24,8 @@ import logging
 import random
 from pathlib import Path
 
+from src.utils.atomic_write import atomic_write
+
 log = logging.getLogger(__name__)
 
 
@@ -39,6 +41,7 @@ class ThompsonBandit:
     """
 
     STATE_PATH = Path("models/bandit_state.json")
+    MIN_SAMPLES_FOR_PURE = 10  # H10: below this, blend with global posterior
 
     def __init__(self, arms: list[str], prior_alpha: float = 2.0, prior_beta: float = 2.0):
         self._arms = list(arms)
@@ -63,9 +66,32 @@ class ThompsonBandit:
         return self._counts[k]
 
     def sample(self, arm: str, context: str = "global") -> float:
-        """Sample win-rate from Beta posterior. The randomness is the explore signal."""
+        """Sample win-rate from Beta posterior with hierarchical sharing for low-sample contexts."""
         b = self._bucket(arm, context)
-        return random.betavariate(b["alpha"], b["beta"])
+        n_obs = b["trades"]
+
+        if n_obs >= self.MIN_SAMPLES_FOR_PURE or context == "global":
+            # Enough data: use context-specific posterior directly
+            return random.betavariate(b["alpha"], b["beta"])
+
+        # H10: Hierarchical sharing - blend context-specific with global posterior
+        context_sample = random.betavariate(b["alpha"], b["beta"])
+        global_alpha, global_beta = self._global_posterior(arm)
+        global_sample = random.betavariate(global_alpha, global_beta)
+
+        # Weight: more context data -> more weight on context-specific
+        weight = n_obs / self.MIN_SAMPLES_FOR_PURE
+        return weight * context_sample + (1 - weight) * global_sample
+
+    def _global_posterior(self, arm: str) -> tuple[float, float]:
+        """Aggregate posterior across all contexts for a given arm."""
+        total_alpha = self._prior_alpha
+        total_beta = self._prior_beta
+        for k, v in self._counts.items():
+            if k.endswith(f"|{arm}"):
+                total_alpha += v["alpha"] - self._prior_alpha
+                total_beta += v["beta"] - self._prior_beta
+        return max(self._prior_alpha, total_alpha), max(self._prior_beta, total_beta)
 
     def best_arm(self, context: str = "global") -> tuple[str, float]:
         """Thompson sampling: sample each arm, return arm with highest sample."""
@@ -132,7 +158,7 @@ class ThompsonBandit:
     def _save(self) -> None:
         try:
             self.STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self.STATE_PATH.write_text(json.dumps(self._counts, indent=2))
+            atomic_write(self.STATE_PATH, json.dumps(self._counts, indent=2))
         except Exception as exc:
             log.warning("ThompsonBandit save failed: %s", exc)
 
