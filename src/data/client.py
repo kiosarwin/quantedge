@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import os
 import time
 from typing import Any, Awaitable, TypeVar
 
@@ -105,8 +106,8 @@ class BinanceFuturesClient:
 
         self._exchange = ccxt.binance(
             {
-                "apiKey": ex_cfg.get("api_key", ""),
-                "secret": ex_cfg.get("api_secret", ""),
+                "apiKey": os.environ.get("BINANCE_API_KEY", ""),
+                "secret": os.environ.get("BINANCE_API_SECRET", ""),
                 "options": options,
                 "enableRateLimit": True,
                 # Inner ceiling: aiohttp ClientTimeout total per HTTP request.

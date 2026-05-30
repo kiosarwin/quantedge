@@ -221,12 +221,8 @@ def cleanup_workspace_artifacts(root: Path | None = None) -> dict[str, int]:
 def load_config(path: str) -> dict:
     cfg = yaml.safe_load(Path(path).read_text())
     load_dotenv()
-    cfg["exchange"]["api_key"] = os.getenv(
-        "BINANCE_API_KEY", cfg["exchange"].get("api_key", "")
-    )
-    cfg["exchange"]["api_secret"] = os.getenv(
-        "BINANCE_API_SECRET", cfg["exchange"].get("api_secret", "")
-    )
+    cfg["exchange"]["api_key"] = os.getenv("BINANCE_API_KEY", "")
+    cfg["exchange"]["api_secret"] = os.getenv("BINANCE_API_SECRET", "")
     return cfg
 
 def normalize_config(cfg: dict) -> dict:

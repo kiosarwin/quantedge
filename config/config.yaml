@@ -6,8 +6,7 @@
 exchange:
   name: binance_futures
   testnet: false                    # Paper mode uses live public market data; live orders still require mode=live
-  api_key: ""                      # Set via .env: BINANCE_API_KEY
-  api_secret: ""                   # Set via .env: BINANCE_API_SECRET
+  # Credentials: set BINANCE_API_KEY and BINANCE_API_SECRET in .env (never in this file)
   recv_window: 10000
   fapi_base_url: "https://fapi.binance.com"     # fapi1/2/3 blocked in ID; fapi.binance.com works
 
