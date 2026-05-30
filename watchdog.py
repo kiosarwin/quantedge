@@ -179,6 +179,23 @@ def log_last_modified_ago() -> float:
         return float("inf")
 
 
+def check_heartbeat(timeout_seconds: float = 300.0) -> bool:
+    """Check if the bot heartbeat file is fresh.
+
+    Reads data/heartbeat.json and returns True if the timestamp is within
+    timeout_seconds of now. Returns False if the file is stale, missing,
+    or unparseable.
+    """
+    import json
+    heartbeat_path = BOT_DIR / "data" / "heartbeat.json"
+    try:
+        data = json.loads(heartbeat_path.read_text())
+        ts = float(data.get("timestamp", 0.0))
+        return (time.time() - ts) <= timeout_seconds
+    except (FileNotFoundError, ValueError, KeyError, json.JSONDecodeError):
+        return False
+
+
 def memory_mb(pid: int) -> float:
     try:
         with open(f"/proc/{pid}/status") as f:
@@ -259,13 +276,14 @@ def run() -> None:
 
             # ── Check for hung process ────────────────────────────────
             silence = log_last_modified_ago()
-            if silence > HANG_TIMEOUT:
-                log.warning("Bot hung — no log activity for %.0fs — killing", silence)
+            heartbeat_ok = check_heartbeat(HANG_TIMEOUT)
+            if silence > HANG_TIMEOUT and not heartbeat_ok:
+                log.warning("Bot hung — no log activity for %.0fs and heartbeat stale — killing", silence)
                 diagnosis, category = extract_last_errors()
                 alert = format_alert(
                     title="Bot hung & restarted",
                     restart_num=restart_count + 1,
-                    extra=f"No log activity for `{silence:.0f}s`.\n",
+                    extra=f"No log activity for `{silence:.0f}s` and heartbeat stale.\n",
                     diagnosis=diagnosis,
                     category=category,
                 )

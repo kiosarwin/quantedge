@@ -16,6 +16,7 @@ import logging
 import math
 import os
 import pathlib
+import signal
 import shutil
 import time
 from datetime import datetime, timezone
@@ -320,6 +321,7 @@ class NinjaTrader:
         self._equity_graph_points: list[dict[str, float]] = []
         self._running = False
         self._heartbeat_ts = 0.0
+        self._cycle_count = 0
         self._tg_heartbeat_ts = 0.0
         self._tg_cycle_report_ts = 0.0
         self._tg_equity_graph_ts = 0.0
@@ -1413,10 +1415,32 @@ class NinjaTrader:
         restored_positions = self._telegram_open_positions()
         if restored_positions:
             await self._telegram.restored_positions(restored_positions, self._trading["mode"])
+
+        # ── Register graceful shutdown signal handlers ─────────────────
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            loop.add_signal_handler(sig, self._handle_shutdown_signal, sig)
+
         try:
             await self._loop()
         finally:
             await self._shutdown()
+
+    def _handle_shutdown_signal(self, sig: signal.Signals) -> None:
+        """Handle SIGINT/SIGTERM for graceful shutdown."""
+        sig_name = sig.name if hasattr(sig, "name") else str(sig)
+        log.info("Received %s — initiating graceful shutdown...", sig_name)
+        self._running = False
+        # Persist all state immediately
+        try:
+            self._trade_mgr._save_state()
+        except Exception as exc:
+            log.warning("Trade manager state save on shutdown failed: %s", exc)
+        try:
+            self._learner._save_state()
+        except Exception as exc:
+            log.warning("Learner state save on shutdown failed: %s", exc)
+        log.info("Graceful shutdown complete - state persisted")
 
     async def _loop(self) -> None:
         scan_interval = self._trading["scan_interval_seconds"]
@@ -1430,6 +1454,7 @@ class NinjaTrader:
             try:
                 tick_start = time.time()
                 _cycle += 1
+                self._cycle_count = _cycle
 
                 # ── Circuit breaker: pause if too many consecutive errors ─
                 if _circuit_breaker_until > time.time():
@@ -2525,6 +2550,18 @@ class NinjaTrader:
 
     async def _heartbeat(self) -> None:
         self._heartbeat_ts = time.time()
+        # Write heartbeat liveness file for external watchdog
+        try:
+            hb_path = Path("data/heartbeat.json")
+            hb_path.parent.mkdir(parents=True, exist_ok=True)
+            hb_payload = json.dumps({
+                "timestamp": self._heartbeat_ts,
+                "status": "running",
+                "cycle": self._cycle_count,
+            })
+            atomic_write(hb_path, hb_payload)
+        except Exception as exc:
+            log.debug("Heartbeat file write failed: %s", exc)
         equity = self._risk.state.equity
         # In paper mode, keep the virtual equity — don't overwrite with real $0 balance
         if self._trading["mode"] != "paper":
