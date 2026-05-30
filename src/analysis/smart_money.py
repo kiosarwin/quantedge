@@ -196,8 +196,8 @@ def detect_smart_money(
     is_distribution = (
         (oi_change_pct >= oi_acc_thresh and price_is_flat and
          (funding_rate > funding_extreme or ls_crowded_long))
-        or (funding_rate > funding_extreme * 1.5 and ls_crowded_long)  # NEW: extreme crowding alone
-        or (oi_change_pct <= oi_dist_thresh and funding_rate > funding_extreme)  # NEW: OI drop + high funding
+        or (funding_rate > funding_extreme * 1.5 and ls_crowded_long and oi_change_pct <= 0)  # H8: require OI not rising
+        or (oi_change_pct <= oi_dist_thresh and funding_rate > funding_extreme)  # OI drop + high funding
     )
     if is_distribution:
         score = 68.0 + min(22.0, abs(funding_rate) / funding_extreme * 12)

@@ -99,6 +99,7 @@ def detect_entry(
     funding_rate: float = 0.0,
     oi_change_pct: float = 0.0,
     taker_buy_ratio: float = 0.5,
+    htf_df: pd.DataFrame | None = None,  # H7: higher-timeframe data for trend confirmation
 ) -> EntrySignal:
     """
     Run all strategy detectors for BOTH long and short, return highest-confidence.
@@ -158,6 +159,32 @@ def detect_entry(
         "Entry signal: %s %s  conf=%.2f  entry=%.4f  sl=%.4f",
         best.direction, best.strategy.value, best.confidence, best.entry_price, best.stop_loss,
     )
+
+    # H7 audit: higher-timeframe trend confirmation (soft gate)
+    if htf_df is not None and len(htf_df) >= 50 and best.confidence > 0:
+        htf_ema_fast = ema(htf_df["close"], 21)
+        if len(htf_ema_fast) >= 2:
+            htf_trend_rising = float(htf_ema_fast.iloc[-1]) > float(htf_ema_fast.iloc[-2])
+            # If entry opposes the HTF trend, reduce confidence
+            if best.direction == "long" and not htf_trend_rising:
+                best = EntrySignal(
+                    strategy=best.strategy,
+                    direction=best.direction,
+                    confidence=max(0.0, best.confidence - 0.15),
+                    entry_price=best.entry_price,
+                    stop_loss=best.stop_loss,
+                    notes=best.notes + " [HTF opposing: conf -0.15]",
+                )
+            elif best.direction == "short" and htf_trend_rising:
+                best = EntrySignal(
+                    strategy=best.strategy,
+                    direction=best.direction,
+                    confidence=max(0.0, best.confidence - 0.15),
+                    entry_price=best.entry_price,
+                    stop_loss=best.stop_loss,
+                    notes=best.notes + " [HTF opposing: conf -0.15]",
+                )
+
     return best
 
 
