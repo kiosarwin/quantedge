@@ -40,7 +40,7 @@ class KellyResult:
 class KellySizer:
     def __init__(self, cfg: dict):
         kelly_cfg = cfg.get("kelly", {})
-        self._fraction = kelly_cfg.get("fraction", 0.30)  # UPGRADED: 30% Kelly (was 25%)
+        self._fraction = kelly_cfg.get("fraction", 0.25)  # Quarter-Kelly (audit H1: reduced from 0.30)
         self._max_risk_pct = kelly_cfg.get("max_kelly_pct", 5.0) / 100  # UPGRADED: 5% cap
         self._min_risk_pct = kelly_cfg.get("min_kelly_pct", 0.7) / 100  # UPGRADED: 0.7% floor
         self._vol_scale = kelly_cfg.get("volatility_scale", True)
@@ -124,6 +124,10 @@ class KellySizer:
                 f"(Kelly={fractional_kelly:.3%})"
             )
         else:
+            # H1 audit: cap effective Kelly at 0.30 to prevent over-aggressive sizing
+            max_effective_kelly = 0.30
+            if fractional_kelly * vol_scalar * confidence_mult > max_effective_kelly:
+                confidence_mult = max_effective_kelly / (fractional_kelly * vol_scalar) if (fractional_kelly * vol_scalar) > 0 else 1.0
             risk_pct = fractional_kelly * vol_scalar * confidence_mult
             rationale = (
                 f"Kelly={kelly_raw:.3%}  ×{self._fraction}frac  ×{vol_scalar:.2f}vol"
