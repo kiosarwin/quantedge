@@ -45,6 +45,7 @@ class FeatureVector:
 
     def to_array(self) -> np.ndarray:
         """Normalize features to roughly [-1, 1] range for numerical stability."""
+        direction_signed = self.direction_long * 2 - 1  # 0/1 -> -1/+1
         return np.array([
             (self.score - 50) / 50,
             (self.structure_quality - 50) / 50,
@@ -54,8 +55,12 @@ class FeatureVector:
             (self.open_interest - 50) / 50,
             (self.volatility - 50) / 50,
             self.momentum_strength / 100,
-            self.direction_long * 2 - 1,  # 0/1 → -1/+1
+            direction_signed,
             1.0,                          # bias term
+            # H9: interaction features
+            (self.score - 50) / 50 * direction_signed,
+            (self.volume_confirmation - 50) / 50 * (self.trend_strength - 50) / 50,
+            (self.funding_sentiment - 50) / 50 * direction_signed,
         ], dtype=float)
 
 
@@ -78,13 +83,14 @@ class OnlineLogistic:
     FEATURE_NAMES = [
         "score", "structure", "trend", "volume", "funding",
         "oi", "volatility", "momentum", "direction", "bias",
+        "score_x_direction", "volume_x_trend", "funding_x_direction",
     ]
     N_FEATURES = len(FEATURE_NAMES)
 
     def __init__(self, learning_rate: float = 0.05, l2: float = 0.01):
         self._w = np.zeros(self.N_FEATURES)
         # Initialize bias slightly positive — most setups passing gates win > 50%
-        self._w[-1] = 0.1
+        self._w[9] = 0.1
         self._lr = learning_rate
         self._l2 = l2
         self._n_updates = 0
@@ -175,6 +181,12 @@ class OnlineLogistic:
             saved_w = data.get("weights", [])
             if len(saved_w) == self.N_FEATURES:
                 self._w = np.array(saved_w, dtype=float)
+            elif len(saved_w) < self.N_FEATURES:
+                # Backward compat: pad old state with zeros for new interaction features
+                padded = np.zeros(self.N_FEATURES)
+                padded[:len(saved_w)] = saved_w
+                self._w = padded
+                log.info("OnlineLogistic: padded weights from %d to %d features", len(saved_w), self.N_FEATURES)
             self._n_updates = int(data.get("n_updates", 0))
             self._loss_history = list(data.get("loss_history", []))
             log.info("OnlineLogistic loaded: n_updates=%d weights=%s",
