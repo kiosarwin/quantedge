@@ -185,6 +185,14 @@ class TradeDataPoint:
     time_series_size_mult: float = 1.0
     time_series_reason: str = ""
 
+    # ── Short macro overlay diagnostics ─────────────────────────────────
+    short_macro_state: str = "neutral"
+    short_macro_score: float = 0.0
+    short_macro_reason: str = ""
+    short_macro_score_mult: float = 1.0
+    short_macro_size_mult: float = 1.0
+    short_macro_threshold_shift: float = 0.0
+
     # ── Position setup (null for no_trade) ───────────────────────────────
     entry_price: Optional[float] = None
     stop_loss: Optional[float] = None
@@ -356,6 +364,12 @@ def _extract_signal_fields(bd, snap, score_threshold: float) -> dict:
         time_series_score_mult=float(getattr(bd, "time_series_score_mult", 1.0) or 1.0),
         time_series_size_mult=float(getattr(bd, "time_series_size_mult", 1.0) or 1.0),
         time_series_reason=str(getattr(bd, "time_series_reason", "") or ""),
+        short_macro_state=str(getattr(bd, "short_macro_state", "neutral") or "neutral"),
+        short_macro_score=float(getattr(bd, "short_macro_score", 0.0) or 0.0),
+        short_macro_reason=str(getattr(bd, "short_macro_reason", "") or ""),
+        short_macro_score_mult=float(getattr(bd, "short_macro_score_mult", 1.0) or 1.0),
+        short_macro_size_mult=float(getattr(bd, "short_macro_size_mult", 1.0) or 1.0),
+        short_macro_threshold_shift=float(getattr(bd, "short_macro_threshold_shift", 0.0) or 0.0),
     )
 
 

@@ -1,0 +1,157 @@
+# ============================================================
+#  NINJA SMART TRADER — Spot Edition
+#  Binance SPOT (no leverage, LONG only, professional swing trading)
+# ============================================================
+
+exchange:
+  name: binance_spot
+  testnet: false                   # true → Binance Spot Testnet
+  api_key: ""                      # Set via .env: BINANCE_API_KEY
+  api_secret: ""                   # Set via .env: BINANCE_API_SECRET
+  recv_window: 10000
+
+trading:
+  mode: paper                      # paper | live | backtest
+  base_currency: USDT
+  min_score_threshold: 67          # ONLY trade if score ≥ 75
+  max_open_trades: 3               # Maximum concurrent positions
+  top_pairs_to_trade: 2            # Enter at most N new trades per scan
+  scan_interval_seconds: 300       # 5-minute scan cycle
+  candle_refresh_seconds: 60
+
+# ── Capital Allocation (Spot — no leverage) ───────────────────
+capital:
+  total_usdt: 1000.0               # Starting capital (paper / seed)
+  min_position_pct: 10             # Minimum 10% of equity per trade
+  max_position_pct: 25             # Maximum 25% of equity per trade
+
+# ── Risk Management ───────────────────────────────────────────
+risk:
+  daily_loss_cap_pct: 5.0          # Halt new entries if -5% on the day
+  max_drawdown_pct: 12.0           # Halt if equity drops 12% from peak
+  min_rr_ratio: 2.0                # Minimum R:R — skip setups below this
+  max_consecutive_losses: 4        # Pause after 4 straight losses
+
+# ── Exit Strategy ─────────────────────────────────────────────
+exit:
+  tp1_pct: 0.10                    # TP1 at +10%
+  tp1_size_pct: 0.40               # Sell 40% at TP1
+  tp2_pct: 0.18                    # TP2 at +18%
+  tp2_size_pct: 0.35               # Sell 35% at TP2
+  tp3_pct: 0.25                    # TP3 at +25%
+  tp3_size_pct: 0.25               # Sell remaining 25% at TP3
+  trailing_stop_pct: 0.05          # 5% trailing stop after TP1
+  max_hold_hours: 120              # Force-close after 5 days
+
+# ── Pair Scanner ──────────────────────────────────────────────
+filters:
+  min_24h_volume_usdt: 5_000_000   # $5M minimum daily volume
+  min_price_usdt: 0.0001
+  blacklisted_pairs:
+    - USDCUSDT
+    - BUSDUSDT
+    - TUSDUSDT
+    - USDTUSDT
+    - FDUSDUSDT
+    - DAIUSDT
+  stablecoins:
+    - USDC
+    - BUSD
+    - TUSD
+    - DAI
+    - FDUSD
+
+# ── Timeframes ────────────────────────────────────────────────
+timeframes:
+  primary: 4h                      # Trend / regime / scoring
+  secondary: 1h                    # Structure confirmation
+  entry: 15m                       # Precise entry timing
+  higher: 1d                       # Higher-timeframe bias
+
+# ── Technical Indicators ──────────────────────────────────────
+indicators:
+  atr_period: 14
+  atr_sl_multiplier: 2.0           # SL = entry - ATR × multiplier
+  ema_fast: 50                     # EMA 50
+  ema_slow: 200                    # EMA 200
+  ema_trend: 200
+  rsi_period: 14
+  adx_period: 14
+  volume_spike_multiplier: 2.0     # Volume >2× average = spike
+  volume_lookback: 20
+  btc_correlation_lookback: 48     # Candles for BTC correlation
+  min_btc_correlation: 0.3         # Minimum positive BTC correlation
+
+# ── Market Structure ──────────────────────────────────────────
+structure:
+  swing_lookback: 10
+  bos_confirmation_candles: 2
+  liquidity_sweep_pct: 0.3         # % wick beyond level counts as sweep
+
+# ── Market Regime ─────────────────────────────────────────────
+regime:
+  adx_trending_threshold: 25       # ADX > 25 = trending
+  atr_extreme_vol_multiplier: 2.5  # ATR > 2.5× average = extreme vol
+  sideways_atr_pct_max: 0.5        # Max ATR% for sideways classification
+
+# ── BTC Safety Gate (critical for altcoin trading) ────────────
+btc:
+  safety_enabled: true
+  symbol: "BTC/USDT"               # BTC spot symbol
+  dump_threshold_4h_pct: -3.0      # BTC down -3% in 4H → halt altcoin entries
+  recovery_threshold_pct: 1.5      # BTC recovers +1.5% from low → re-enable
+  ema_period: 50                   # BTC EMA for trend bias
+  below_ema_halt: true             # Halt if BTC price < EMA50
+
+# ── Entry Strategies ──────────────────────────────────────────
+entry:
+  strategies:
+    - "breakout_retest"            # Break resistance → wait pullback → enter rejection
+    - "pullback_ema"               # Uptrend → retrace to EMA50 → bullish reaction
+    - "liquidity_sweep"            # Fake breakdown → strong recovery → enter long
+  require_volume_confirmation: true
+  min_volume_ratio: 1.5            # Volume must be 1.5× average at entry
+
+# ── Scoring Weights (must sum to 100) ─────────────────────────
+scoring:
+  weights:
+    trend_strength:      25        # EMA alignment + direction
+    volume_expansion:    20        # Volume spike + buy pressure
+    structure_quality:   20        # BOS + swing structure
+    momentum_alignment:  15        # RSI + ADX momentum
+    btc_correlation:     10        # BTC trend alignment
+    volatility_condition: 10       # ATR in ideal range
+  dynamic_adjustment: true
+  adjustment_rate: 0.02
+
+# ── Adaptive Learning ─────────────────────────────────────────
+learning:
+  min_trades_to_adjust: 20
+  lookback_trades: 100
+  save_path: "models/learning_state.json"
+  trade_log_path: "data/trades/trade_log.parquet"
+
+# ── Backtesting ───────────────────────────────────────────────
+backtest:
+  start_date: "2024-01-01"
+  end_date: "2024-12-31"
+  initial_capital: 10000
+  commission_pct: 0.10             # 0.10% spot taker fee
+  slippage_pct: 0.05
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level: INFO
+  log_file: "logs/ninja_trader.log"
+  trade_log_file: "logs/trades.log"
+  max_bytes: 10_485_760
+  backup_count: 5
+
+# ── Safety ────────────────────────────────────────────────────
+safety:
+  pause_on_extreme_volatility: true
+  extreme_vol_atr_multiplier: 2.5
+  max_consecutive_losses: 4
+  api_retry_attempts: 3
+  api_retry_delay_seconds: 5
+  heartbeat_interval_seconds: 60

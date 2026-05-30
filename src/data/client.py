@@ -208,7 +208,11 @@ class BinanceFuturesClient:
         return await self._call(self._exchange.fetch_ticker(symbol), f"fetch_ticker({symbol})")
 
     async def fetch_tickers(self, symbols: list[str] | None = None) -> dict:
-        return await self._call(self._exchange.fetch_tickers(symbols), "fetch_tickers")
+        raw = await self._call(self._exchange.fetch_tickers(symbols), "fetch_tickers")
+        if not isinstance(raw, dict):
+            log.warning("fetch_tickers returned %s instead of dict (possible geo-block); returning empty", type(raw).__name__)
+            return {}
+        return raw
 
     async def fetch_funding_rate(self, symbol: str) -> dict:
         """Returns {'fundingRate': float, 'nextFundingTime': int, ...}"""

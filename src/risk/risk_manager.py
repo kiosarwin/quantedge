@@ -1,11 +1,21 @@
 """
 Risk manager — position sizing, SL/TP calculation, daily loss / drawdown guards.
 Integrates fractional Kelly sizing when EV model data is available.
+
+Professional-grade additions:
+  - Historical VaR / CVaR (Conditional VaR) from equity curve
+  - Dynamic drawdown management with graduated size reduction
+  - Recovery period logic with gradual re-entry
+  - Portfolio heat tracking and risk budget allocation
+  - Risk-adjusted performance metrics (Sharpe, Sortino, Calmar)
+  - Dynamic leverage adjustment based on volatility regime
 """
 from __future__ import annotations
 
+import collections
 import logging
 import math
+import statistics
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
@@ -19,6 +29,155 @@ if TYPE_CHECKING:
     from src.models.ev_model import EVResult
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+#  Portfolio Risk Metrics — professional-grade analytics
+# ---------------------------------------------------------------------------
+
+@dataclass
+class PortfolioRiskMetrics:
+    """Snapshot of portfolio-level risk analytics computed from equity curve."""
+    var_95: float = 0.0          # 95% Value-at-Risk (% of equity)
+    var_99: float = 0.0          # 99% Value-at-Risk (% of equity)
+    cvar_95: float = 0.0         # 95% Conditional VaR (expected shortfall)
+    cvar_99: float = 0.0         # 99% Conditional VaR
+    sharpe_ratio: float = 0.0    # annualized Sharpe (risk-free = 0)
+    sortino_ratio: float = 0.0   # annualized Sortino (downside deviation)
+    calmar_ratio: float = 0.0    # annualized return / max drawdown
+    max_drawdown_pct: float = 0.0
+    current_drawdown_pct: float = 0.0
+    recovery_factor: float = 0.0 # net profit / max drawdown
+    portfolio_heat_pct: float = 0.0  # total open risk as % of equity
+    tail_risk_score: float = 0.0 # 0-100, higher = fatter tails
+    volatility_annualized: float = 0.0
+    downside_deviation: float = 0.0
+    win_rate: float = 0.0
+    profit_factor: float = 0.0
+    avg_win: float = 0.0
+    avg_loss: float = 0.0
+    payoff_ratio: float = 0.0    # avg_win / abs(avg_loss)
+    kelly_criterion: float = 0.0 # theoretical optimal bet fraction
+    sample_size: int = 0
+
+
+class RiskAnalytics:
+    """Computes institutional-grade risk metrics from trade history and equity curve.
+
+    Used by the CRO (RiskManager) to make dynamic sizing and drawdown decisions.
+    """
+
+    def __init__(self, lookback: int = 100):
+        self._lookback = lookback
+        self._equity_history: collections.deque[float] = collections.deque(maxlen=lookback + 1)
+        self._trade_returns: collections.deque[float] = collections.deque(maxlen=lookback)
+        self._daily_returns: collections.deque[float] = collections.deque(maxlen=252)
+
+    def record_equity(self, equity: float) -> None:
+        """Append equity point for rolling metrics."""
+        if equity > 0:
+            self._equity_history.append(equity)
+
+    def record_trade_return(self, pnl_pct: float) -> None:
+        """Record a closed trade return (% of equity at entry)."""
+        self._trade_returns.append(pnl_pct)
+
+    def compute(self, peak_equity: float, current_equity: float) -> PortfolioRiskMetrics:
+        """Compute all risk metrics from current state."""
+        m = PortfolioRiskMetrics()
+        m.current_drawdown_pct = (
+            (peak_equity - current_equity) / peak_equity * 100.0
+            if peak_equity > 0 else 0.0
+        )
+
+        if len(self._trade_returns) < 3:
+            m.sample_size = len(self._trade_returns)
+            return m
+
+        returns = list(self._trade_returns)
+        m.sample_size = len(returns)
+
+        # --- Basic stats ---
+        m.win_rate = sum(1 for r in returns if r > 0) / len(returns) * 100.0
+        wins = [r for r in returns if r > 0]
+        losses = [r for r in returns if r < 0]
+        m.avg_win = statistics.mean(wins) if wins else 0.0
+        m.avg_loss = statistics.mean(losses) if losses else 0.0
+        m.payoff_ratio = abs(m.avg_win / m.avg_loss) if m.avg_loss != 0 else 0.0
+        gross_profit = sum(wins) if wins else 0.0
+        gross_loss = abs(sum(losses)) if losses else 0.0
+        m.profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+
+        # --- Kelly criterion ---
+        if m.win_rate > 0 and m.payoff_ratio > 0:
+            p = m.win_rate / 100.0
+            b = m.payoff_ratio
+            m.kelly_criterion = max(0.0, (p * b - (1 - p)) / b)
+
+        # --- Volatility metrics ---
+        if len(returns) >= 2:
+            m.volatility_annualized = statistics.stdev(returns) * math.sqrt(252)
+            downside = [r for r in returns if r < 0]
+            m.downside_deviation = statistics.stdev(downside) * math.sqrt(252) if len(downside) >= 2 else 0.0
+
+        # --- Risk-adjusted returns ---
+        if m.volatility_annualized > 0:
+            mean_annual = statistics.mean(returns) * 252
+            m.sharpe_ratio = mean_annual / m.volatility_annualized
+        if m.downside_deviation > 0:
+            mean_annual = statistics.mean(returns) * 252
+            m.sortino_ratio = mean_annual / m.downside_deviation
+
+        # --- VaR / CVaR (historical simulation) ---
+        sorted_returns = sorted(returns)
+        n = len(sorted_returns)
+        idx_95 = max(0, int(n * 0.05))
+        idx_99 = max(0, int(n * 0.01))
+        m.var_95 = abs(sorted_returns[idx_95])
+        m.var_99 = abs(sorted_returns[idx_99])
+        tail_95 = sorted_returns[:idx_95 + 1]
+        tail_99 = sorted_returns[:idx_99 + 1]
+        m.cvar_95 = abs(statistics.mean(tail_95)) if tail_95 else m.var_95
+        m.cvar_99 = abs(statistics.mean(tail_99)) if tail_99 else m.var_99
+
+        # --- Tail risk score (0-100) ---
+        # Compares CVaR to VaR — higher ratio = fatter tails
+        if m.var_95 > 0:
+            tail_ratio = m.cvar_95 / m.var_95
+            m.tail_risk_score = min(100.0, max(0.0, (tail_ratio - 1.0) * 200.0))
+
+        # --- Drawdown from equity curve ---
+        if len(self._equity_history) >= 2:
+            eq = list(self._equity_history)
+            peak = eq[0]
+            max_dd = 0.0
+            for e in eq:
+                if e > peak:
+                    peak = e
+                dd = (peak - e) / peak * 100.0 if peak > 0 else 0.0
+                max_dd = max(max_dd, dd)
+            m.max_drawdown_pct = max_dd
+
+        # --- Calmar ratio ---
+        if m.max_drawdown_pct > 0:
+            mean_annual = statistics.mean(returns) * 252
+            m.calmar_ratio = mean_annual / (m.max_drawdown_pct / 100.0)
+
+        # --- Recovery factor ---
+        if m.max_drawdown_pct > 0:
+            net_profit = sum(returns)
+            m.recovery_factor = net_profit / (m.max_drawdown_pct / 100.0)
+
+        return m
+
+    def get_drawdown_state(self, peak_equity: float, current_equity: float) -> tuple[float, str]:
+        """Return (drawdown_pct, state) where state is 'normal', 'warning', 'critical'."""
+        dd = (peak_equity - current_equity) / peak_equity * 100.0 if peak_equity > 0 else 0.0
+        if dd >= 15.0:
+            return dd, "critical"
+        if dd >= 8.0:
+            return dd, "warning"
+        return dd, "normal"
 
 
 @dataclass
@@ -71,6 +230,14 @@ class PortfolioState:
     symbol_risk_pct: dict[str, float] = field(default_factory=dict)
     direction_risk_pct: dict[str, float] = field(default_factory=dict)
     sector_risk_pct: dict[str, float] = field(default_factory=dict)
+    # --- Dynamic drawdown management ---
+    drawdown_state: str = "normal"      # 'normal' | 'warning' | 'critical'
+    recovery_mode: bool = False         # True when recovering from drawdown
+    recovery_start_ts: float = 0.0      # when recovery mode began
+    recovery_stage: int = 0             # 0-3, gradual re-entry stages
+    peak_drawdown_pct: float = 0.0      # worst drawdown observed this cycle
+    drawdown_enter_ts: float = 0.0      # when drawdown state escalated
+    risk_budget_multiplier: float = 1.0 # 0.0-1.0, reduced during drawdown
 
     def reset_day(self, equity: float) -> None:
         self.daily_start_equity = equity
@@ -98,6 +265,54 @@ class PortfolioState:
             return 0.0
         return (self.peak_equity - self.equity) / self.peak_equity * 100
 
+    def update_drawdown_state(self, warning_threshold: float = 8.0, critical_threshold: float = 15.0) -> None:
+        """Update drawdown state machine and risk budget multiplier."""
+        dd = self.drawdown_pct
+        self.peak_drawdown_pct = max(self.peak_drawdown_pct, dd)
+
+        prev_state = self.drawdown_state
+        if dd >= critical_threshold:
+            self.drawdown_state = "critical"
+        elif dd >= warning_threshold:
+            self.drawdown_state = "warning"
+        else:
+            self.drawdown_state = "normal"
+
+        # State transition: enter drawdown management
+        if self.drawdown_state != prev_state and self.drawdown_state != "normal":
+            self.drawdown_enter_ts = time.time()
+            log.warning(
+                "Drawdown state escalated: %s → %s (%.2f%%)",
+                prev_state, self.drawdown_state, dd,
+            )
+
+        # Risk budget multiplier: graduated reduction
+        if self.drawdown_state == "critical":
+            self.risk_budget_multiplier = 0.25  # 75% reduction
+        elif self.drawdown_state == "warning":
+            self.risk_budget_multiplier = 0.50  # 50% reduction
+        else:
+            # Recovery: gradual ramp-up
+            if self.recovery_mode:
+                elapsed = time.time() - self.recovery_start_ts
+                # Stage 0: 60%, Stage 1: 70%, Stage 2: 85%, Stage 3: 100%
+                stage = min(3, int(elapsed / 3600))  # advance stage every hour
+                self.recovery_stage = stage
+                self.risk_budget_multiplier = [0.60, 0.70, 0.85, 1.00][stage]
+                if stage >= 3:
+                    self.recovery_mode = False
+                    self.peak_drawdown_pct = 0.0
+                    log.info("Recovery complete — full risk budget restored")
+            else:
+                self.risk_budget_multiplier = 1.0
+
+        # Enter recovery mode when exiting critical/warning
+        if prev_state in ("warning", "critical") and self.drawdown_state == "normal":
+            self.recovery_mode = True
+            self.recovery_start_ts = time.time()
+            self.recovery_stage = 0
+            log.info("Entering recovery mode — risk budget at 60%%, ramping up over 3 hours")
+
 
 class RiskManager:
     def __init__(self, cfg: dict, exploration_mode: bool = False):
@@ -111,6 +326,9 @@ class RiskManager:
         from src.risk.kelly_sizer import KellySizer
         self._kelly = KellySizer(cfg)
         self._last_setup_rejection_reason = ""
+
+        # Professional-grade risk analytics engine
+        self._analytics = RiskAnalytics(lookback=200)
 
     @property
     def last_setup_rejection_reason(self) -> str:
@@ -332,6 +550,21 @@ class RiskManager:
                 size_usd = (max_risk_usd / r_distance) * entry_price
             risk_pct = min(risk_pct * kelly_scale, self._risk["max_risk_per_trade_pct"])
 
+        # ── Dynamic drawdown-aware sizing (professional CRO layer) ────
+        dd_multiplier = self.get_dynamic_risk_multiplier()
+        if dd_multiplier < 1.0:
+            size_usd *= dd_multiplier
+            risk_pct *= dd_multiplier
+            log.info(
+                "%s drawdown-adjusted: multiplier=%.2f → size=$%.2f risk=%.2f%%",
+                symbol, dd_multiplier, size_usd, risk_pct,
+            )
+
+        # ── VaR-adjusted sizing (institutional risk scaling) ─────────
+        if not backtest and not self._exploration:
+            size_usd = self.var_adjusted_position_size(size_usd)
+            risk_pct = (size_usd * r_distance / entry_price) / equity * 100 if equity > 0 else risk_pct
+
         # ── Minimum risk-per-trade floor ($5 default) ────────────────────
         # Ensures each trade risks at least a meaningful dollar amount.
         min_risk_usd = self._risk.get("min_risk_usd", 5.0)
@@ -442,7 +675,10 @@ class RiskManager:
             trail_size_pct=float(exit_profile.get("trail_size_pct", self._exit["trail_size_pct"])),
             breakeven_trigger_r=float(exit_profile.get("breakeven_trigger_r", self._exit.get("breakeven_trigger_r", 1.0))),
             trailing_atr_multiplier=float(exit_profile.get("trailing_atr_multiplier", self._exit.get("trailing_atr_multiplier", 1.5))),
-            max_hold_duration_s=int(exit_profile.get("max_hold_duration_s", self._exit.get("max_hold_duration_s", 172800))),
+            max_hold_duration_s=int(exit_profile.get(
+                "max_hold_duration_s_short" if direction == "short" else "max_hold_duration_s",
+                exit_profile.get("max_hold_duration_s", self._exit.get("max_hold_duration_s", 172800)),
+            )),
             short_setup_label=str(short_setup_label or ""),
             short_setup_confidence=float(short_setup_confidence or 0.0),
             setup_passport=dict(setup_passport or {}),
@@ -509,4 +745,87 @@ class RiskManager:
                 )
         else:
             self.state.consecutive_losses = 0
+
+        # Record trade return for analytics
+        equity_before = self.state.equity
+        if equity_before > 0:
+            self._analytics.record_trade_return(pnl / equity_before * 100.0)
+
         self.update_equity(self.state.equity + pnl)
+
+    # ------------------------------------------------------------------ #
+    #  Professional-grade risk analytics                                   #
+    # ------------------------------------------------------------------ #
+
+    def get_risk_metrics(self) -> PortfolioRiskMetrics:
+        """Compute and return current portfolio risk metrics."""
+        return self._analytics.compute(self.state.peak_equity, self.state.equity)
+
+    def get_drawdown_state(self) -> tuple[float, str]:
+        """Return (drawdown_pct, state) from analytics."""
+        return self._analytics.get_drawdown_state(self.state.peak_equity, self.state.equity)
+
+    def get_dynamic_risk_multiplier(self) -> float:
+        """Return risk budget multiplier based on drawdown state.
+
+        Professional CRO behavior:
+        - Normal: 100% risk budget
+        - Warning (8-15% DD): 50% risk budget
+        - Critical (>15% DD): 25% risk budget
+        - Recovery: gradual ramp 60% → 70% → 85% → 100%
+        """
+        self.state.update_drawdown_state(
+            warning_threshold=float(self._risk.get("drawdown_warning_pct", 8.0)),
+            critical_threshold=float(self._risk.get("drawdown_critical_pct", 15.0)),
+        )
+        return self.state.risk_budget_multiplier
+
+    def var_adjusted_position_size(self, base_size_usd: float, confidence_level: float = 0.95) -> float:
+        """Adjust position size based on historical VaR.
+
+        If recent VaR is high relative to normal, reduce size proportionally.
+        This is how institutional desks scale down during volatile periods.
+        """
+        metrics = self._analytics.compute(self.state.peak_equity, self.state.equity)
+        if metrics.sample_size < 10:
+            return base_size_usd
+
+        var_pct = metrics.var_95 if confidence_level <= 0.95 else metrics.var_99
+        # Target: VaR should not exceed 2% of equity per trade
+        target_var = 2.0
+        if var_pct <= target_var:
+            return base_size_usd
+
+        # Scale down proportionally
+        scale = target_var / var_pct
+        scale = max(0.25, min(1.0, scale))  # floor at 25%
+        adjusted = base_size_usd * scale
+        log.info(
+            "VaR-adjusted sizing: base=$%.2f → $%.2f (VaR=%.2f%%, scale=%.2f)",
+            base_size_usd, adjusted, var_pct, scale,
+        )
+        return adjusted
+
+    def should_reduce_exposure(self) -> tuple[bool, str]:
+        """Check if portfolio exposure should be reduced based on risk state.
+
+        Returns (should_reduce, reason).
+        """
+        dd, state = self.get_drawdown_state()
+        if state == "critical":
+            return True, f"critical drawdown ({dd:.1f}%)"
+
+        metrics = self._analytics.compute(self.state.peak_equity, self.state.equity)
+        if metrics.sample_size >= 10:
+            # High tail risk: reduce exposure
+            if metrics.tail_risk_score > 70:
+                return True, f"high tail risk ({metrics.tail_risk_score:.0f}/100)"
+            # VaR spike: reduce exposure
+            if metrics.var_99 > 5.0:
+                return True, f"VaR99 spike ({metrics.var_99:.1f}%)"
+
+        return False, "ok"
+
+    def portfolio_heat_pct(self) -> float:
+        """Current portfolio heat as % of equity (total open risk)."""
+        return self.state.open_risk_pct

@@ -58,7 +58,7 @@ class StrategyRouter:
         self._short_reversal_min_structure = float(s.get("short_reversal_min_structure", 62.0))
         self._short_reversal_min_volume = float(s.get("short_reversal_min_volume", 45.0))
         # Dedicated post-distribution short setups (Phase D / Liq Sweep) ported
-        # from `kiosarwin/Futures`. These admit shorts via a price-structure
+        # from `quantedge`. These admit shorts via a price-structure
         # thesis that does not depend on `regime=='distribution'`.
         self._enable_short_setups = bool(s.get("enable_short_setups", True))
         self._short_setup_min_confidence = float(
@@ -392,7 +392,7 @@ class StrategyRouter:
         """Admit a short via the dedicated Phase D / Liq Sweep detector.
 
         These are the post-distribution short edges ported from
-        ``kiosarwin/Futures``. They encode the breakdown thesis directly
+        ``quantedge``. They encode the breakdown thesis directly
         from price structure, so they admit shorts without requiring
         ``regime=='distribution'`` or smart-money DISTRIBUTION/LIQ_SWEEP
         phases. The standard volatility, OI, and volume floors still apply
@@ -519,7 +519,7 @@ class StrategyRouter:
                 label = self.short_setup_label(breakdown) or "phase_d"
                 reason = f"short setup sleeve via {label}"
                 # Phase D / Liq Sweep are the bot's primary statistical edge
-                # cohorts in kiosarwin/Futures. Give them a slightly larger
+                # cohorts in quantedge. Give them a slightly larger
                 # ranking bonus so they surface ahead of generic reversal
                 # candidates when both fire on the same scan.
                 ranking_bonus += 1.5

@@ -1,12 +1,8 @@
-# Ninja Trader — Handbook
-
-> Session handoff: `session.md` is the source of truth for the current repo, VM, and bot state.
+# QuantEdge — Technical Handbook
 
 ## What Is This
 
-An automated crypto futures trading bot running on Binance USDT-margined perpetual futures. It scans pairs, scores signals using institutional-grade indicators, manages positions with dynamic exits, and learns from its own trade history to improve over time.
-
-Named after Jim Simons — the bot's internal performance persona is called **Jim**.
+An automated crypto futures trading engine running on Binance USDT-margined perpetual futures. It scans pairs, scores signals using institutional-grade indicators, manages positions with dynamic exits, and learns from its own trade history to improve over time.
 
 ---
 
@@ -28,247 +24,152 @@ Scanner → Scorer → Risk / EV Gate → Executor → TradeManager
 | Risk Manager | `risk/risk_manager.py` | Equity tracking, drawdown guards, position sizing |
 | Kelly Sizer | `risk/kelly_sizer.py` | Fractional Kelly position sizing |
 | Executor | `execution/executor.py` | Places entry, SL, TP orders on Binance |
-| Trade Manager | `execution/trade_manager.py` | Monitors open trades, manages exits, MFE/MAE tracking |
-| Learner | `learning/learner.py` | Records trades, adjusts signal weights over time |
-| EV Model | `models/ev_model.py` | Probabilistic expected value gate |
-| Adaptive Brain | `models/adaptive_brain.py` | Active sizing overlay, pair-health veto, online learning |
-| ML Engine | `models/ml_engine.py` | Passive predictor interface and live readiness helper |
-| Fund Manager | `models/fund_manager.py` | Sharpe, Calmar, profit factor reporting |
-| Shadow Engine | `backtest/shadow_engine.py` | Ghost trades running in parallel to build ML data faster |
-| Dataset Logger | `data/dataset_logger.py` | Writes 85-column parquet dataset for future ML training |
-| Telegram | `notifications/telegram.py` | Alerts for trades, heartbeat, fund manager reports |
+| Trade Manager | `execution/trade_manager.py` | Monitors open positions, manages trailing/TP/SL exits |
+| Learner | `learning/learner.py` | Stores closed trades, computes running statistics |
+| Shadow Engine | `backtest/shadow_engine.py` | Simulates alternative exit strategies |
+| Telegram | `notifications/telegram.py` | Sends trade notifications and reports |
+| Fund Manager | `models/fund_manager.py` | Institutional position scaling and portfolio management |
+| Adaptive Brain | `models/adaptive_brain.py` | AI orchestrator with Thompson bandit + online ML |
+| Strategy Router | `models/strategy_router.py` | Routes signals to strategy sleeves |
+| Cohort Policy | `models/cohort_policy.py` | Tracks health of trade cohorts |
+| Risk Analytics | `risk/risk_manager.py` | VaR/CVaR, Sharpe, Sortino, Calmar metrics |
 
 ---
 
-## Signal Scoring Pipeline
+## Key Concepts
 
-Every 60 seconds the bot scores all eligible pairs. A trade is only taken when all gates pass.
+### Score
+A 0-100 value computed from trend, volume, structure, OI, funding, order book, and volatility. Cross-sectionally normalized via z-score.
 
-### Step 1 — Feature Vector
-Built from multi-timeframe data (1h primary, 4h higher, 15m lower, 5m entry):
-- ATR, ADX, EMA stack (21/55/200)
-- RSI, volume ratio, taker buy ratio
-- Open interest change rate
-- Funding rate deviation
-- Order book imbalance
-- Liquidation pressure
-- BTC correlation
+### Regime
+Four-state classification: `trending_expansion`, `accumulation_compression`, `distribution`, `chaos`. Chaos blocks all trades.
 
-### Step 2 — Regime Classification (4 states)
-| Regime | Condition | Score threshold |
-|---|---|---|
-| `trending_expansion` | ADX > 25, expanding range | 55 |
-| `accumulation_compression` | Low ATR, OI rising | 65 |
-| `distribution` | Bearish structure, OI falling | blocked |
-| `chaos` | Extreme vol or no structure | blocked |
+### Smart Money Phase
+Detects institutional activity: `accumulation`, `trending`, `distribution`, `liquidity_sweep`, `chaos`, `neutral`.
 
-### Step 3 — Smart Money Gate
-Detects institutional accumulation/distribution via OI + price + volume patterns. Trade blocked if no directional bias or score < 60.
+### Expected Value (EV)
+Probability-weighted outcome: `EV = P(win) × avg_win - P(loss) × avg_loss`. Must be positive for trade admission.
 
-### Step 4 — EV Model Gate
-Calculates expected value after taker fees (0.04%) and slippage (0.10%). Trade blocked if net EV < 0.05%. Uses Bayesian priors until 20 closed trades, then switches to empirical win rate.
+### Kelly Criterion
+Optimal bet fraction: `Kelly = (p × b - q) / b`. Used at 25-30% fraction (quarter to third Kelly).
 
-### Step 5 — Weighted Score
-| Component | Weight |
-|---|---|
-| Trend strength | 20 |
-| Structure quality | 20 |
-| Volume confirmation | 15 |
-| Open interest | 15 |
-| Order book | 10 |
-| Funding sentiment | 10 |
-| Volatility | 10 |
+### Setup Passport
+A contract created at entry that defines the expected trade path, invalidation conditions, and quality metrics.
 
-Weights are dynamically adjusted by the Learner after each closed trade (adjustment rate: 0.02 per trade).
-
-**Minimum score to trade: 60** (regime-dependent, see Step 2).
-
-### Step 6 — Signal Confirmation
-A signal must appear on **2 consecutive scans** (2 × 60s = 2 minutes) before an order is placed. Expires if not confirmed within 5 minutes.
+### Cohort
+A group of trades sharing: `strategy_sleeve × market_regime × sm_phase × session × direction`.
 
 ---
 
-## Position Management
+## Trade Lifecycle
 
-### Entry
-- Limit orders preferred (offset 0.05% from mid)
-- Times out after 60s → cancelled
-- Scaled into 2 levels: 60% first, 40% second
-
-### Risk per trade
-- Default: 1.5% of equity (paper baseline now seeds from $70)
-- Hard cap: 2.5% (config cap)
-- Position sized via fractional Kelly (quarter-Kelly, capped at 3%)
-- Leverage: 6x default, up to 10x
-- Min notional: $5 (Binance minimum)
-
-### Exit levels
-| Level | Trigger | Action |
-|---|---|---|
-| SL | 1.5× ATR from entry | Close 100% |
-| TP1 | 1.5R | Close 50%, move SL to breakeven, start trailing |
-| TP2 | 2.0R | Close 30% of remainder, continue trailing |
-| Trailing stop | ATR × 1.5 ratchet | Close remaining after TP1 |
-| Max hold | 48 hours | Close all |
-
-### MFE / MAE Tracking
-Every open trade tracks in real time:
-- **MFE (Maximum Favorable Excursion)** in R — how far price moved in your favor at peak
-- **MAE (Maximum Adverse Excursion)** in R — how far price moved against you at worst
-- `time_to_mfe_peak_s` — seconds from entry to peak
-- `drawdown_duration_s` — total seconds spent underwater
-
----
-
-## Risk Guards
-
-| Guard | Threshold | Action |
-|---|---|---|
-| Daily loss cap | -5% equity ($25) | Stop trading for the day |
-| Max drawdown | -20% equity | Stop trading |
-| Consecutive losses | 3 in a row | Pause |
-| Extreme volatility | ATR × 3.0 | Pause |
-| Min R:R ratio | 2.0 | Block trade |
-| Max open trades | 2 | Block new entries |
-
----
-
-## Learning System
-
-### Phase 1 — Priors only (0–19 closed trades)
-- EV model uses conservative Bayesian priors (52% win rate)
-- Signal weights updated after each trade but with small adjustments
-
-### Phase 2 — EV model active (20+ closed trades) ✅ Jim is here
-- Empirical win rate replaces priors
-- Kelly sizing adjusts based on actual outcome distribution
-- Signal weights actively shift toward components that predicted winning trades
-
-### Phase 3 — Per-signal decay (50+ closed trades, future)
-- Individual signal components weighted by their own historical predictiveness
-
-State persists across restarts in `models/learning_state_futures.json`.
-
----
-
-## ML Dataset (Parquet)
-
-Every signal evaluation writes a row to `data/trades/trade_log_futures.parquet`.
-
-**85 columns** covering:
-- Signal scores and EV model output at decision time
-- Regime, feature vector, smart money, spot context
-- Trade dynamics: MFE, MAE, hold duration, time to peak
-- Outcome: PnL, R:R achieved, exit type, win/loss
-
-**No-trade near-misses** (score ≥ 55 but trade not taken) are also logged — enabling the model to learn what it rejected and whether that was correct.
-
-This dataset is the foundation for Phase 3 ML training.
-
----
-
-## Shadow Engine
-
-Runs parallel "ghost trades" at a lower score threshold (no capital at risk). Accelerates ML data collection. State persists to `models/shadow_state.json` across restarts.
-
----
-
-## Deployment
-
-**Infrastructure:** GCP e2-micro, `systemd` service `ninja-watchdog`
-
-**Modes:**
-- `paper` — virtual $70 equity, real Binance testnet API, no real orders
-- `live` — real capital, requires mainnet API keys, `testnet: false`
-- `backtest` — historical OHLCV replay
-
-**Safeguard:** `paper` mode forces `testnet: true` in code regardless of config. `live` mode refuses to start if `testnet: true`.
-
-**Auto-live transition:** When 7 readiness criteria are met (win rate, drawdown, trade count, etc.), the bot can auto-switch from paper to live. Requires mainnet API keys pre-loaded in `.env`.
-
-### Environment variables (`.env`)
 ```
-BINANCE_API_KEY=
-BINANCE_API_SECRET=
-TELEGRAM_TOKEN=
-TELEGRAM_CHAT_ID=
+1. Scanner finds eligible pairs
+2. Market Data fetches snapshots
+3. Scorer computes score + regime + smart money + EV
+4. Strategy Router assigns sleeve (trend/reversal/breakout)
+5. Setup Passport creates trade thesis
+6. Admission Policy checks gates
+7. Cohort Policy verifies historical health
+8. Adaptive Brain applies ML sizing
+9. Risk Manager calculates stops/targets/size
+10. Execution places orders
+11. Trade Manager monitors and exits
 ```
 
-### Run
+---
+
+## Risk Management
+
+### Position Sizing
+- Fractional Kelly (25-30% of optimal)
+- Volatility-adjusted (scale down in high vol)
+- Confidence-based (scale up for high-conviction setups)
+- Drawdown-aware (reduce during drawdown periods)
+
+### Exposure Limits
+- Per-symbol risk cap
+- Per-direction risk cap
+- Per-sector risk cap
+- Total portfolio heat monitoring
+
+### Kill Switches
+- Max drawdown exceeded
+- Daily loss cap hit
+- Weekly loss cap hit
+- Consecutive loss limit
+- Runtime error burst
+- Heartbeat failure
+
+---
+
+## Configuration
+
+All parameters are in `config/config.yaml`. See `SETUP.md` for detailed configuration guide.
+
+---
+
+## Testing
+
 ```bash
-python -m src                          # default config
-python -m src --mode paper             # force paper mode
-python -m src --config path/to/config.yaml
+python -m pytest tests/ -q  # Run all 394 tests
 ```
+
+---
+
+## Monitoring
+
+### Terminal
+Rich-formatted output with color-coded log levels.
+
+### Telegram
+- Trade alerts with full trade cards
+- Hourly heartbeat with equity/drawdown
+- Daily performance reports
+- Error notifications
+
+### Log Files
+`logs/futures_trader.log` with rotation (10MB, 5 backups).
 
 ---
 
 ## Key Files
 
-```
-src/
-  config.yaml                    — all settings
-  main.py                        — bot orchestrator
-  data/
-    client.py                    — Binance API client
-    market_data.py               — OHLCV + derivatives data
-    dataset_logger.py            — parquet ML dataset writer
-  analysis/
-    indicators.py                — ATR, ADX, EMA, RSI, volume
-    structure.py                 — BOS, liquidity sweeps, swing points
-    smart_money.py               — OI-based institutional detection
-    feature_engine.py            — unified feature vector
-    regime.py                    — regime classification
-    spot_context.py              — spot/futures basis, Coinbase premium
-  scoring/scorer.py              — full signal pipeline
-  risk/
-    risk_manager.py              — equity, drawdown, position limits
-    kelly_sizer.py               — Kelly position sizing
-  execution/
-    executor.py                  — order placement
-    trade_manager.py             — open trade lifecycle + MFE/MAE
-  learning/learner.py            — weight adjustment, trade log
-  models/
-    ev_model.py                  — expected value calculation
-    ml_engine.py                 — live readiness, ML prediction
-    fund_manager.py              — performance metrics
-  backtest/
-    engine.py                    — historical backtester
-    shadow_engine.py             — parallel ghost trading
-    reporter.py                  — backtest results tables
-  notifications/telegram.py      — trade alerts, heartbeat
-
-models/
-  learning_state_futures.json    — learner weights + trade log (persisted)
-  shadow_state.json              — shadow engine state (persisted)
-data/trades/
-  trade_log_futures.parquet      — ML training dataset
-logs/
-  futures_trader.log             — rotating log file
-```
-
----
-
-## Telegram Reports
-
-| Message | Trigger |
+| File | Purpose |
 |---|---|
-| Trade opened | On entry fill |
-| Trade closed | On exit with PnL, exit reason, MFE/MAE |
-| Heartbeat | Every 1 minute in current config — equity, drawdown, daily PnL, open positions |
-| Fund manager report | Every 10 closed trades — Sharpe, win rate, profit factor, Jim's bonus |
-| Live readiness | When all 7 criteria pass |
+| `config/config.yaml` | All trading parameters |
+| `src/main.py` | Entry point and main loop |
+| `src/risk/risk_manager.py` | Risk management (CRO) |
+| `src/scoring/scorer.py` | Signal scoring engine |
+| `src/models/adaptive_brain.py` | AI orchestrator |
+| `src/execution/trade_manager.py` | Position management |
+| `src/reporting/attribution.py` | Performance attribution |
+| `data/open_trades.json` | Persisted open positions |
+| `data/learner_state.json` | Learning state |
+| `data/fund_manager_state.json` | Fund manager state |
 
 ---
 
-## Tuning Cheat Sheet
+## Glossary
 
-| Goal | Config key | Location |
-|---|---|---|
-| Trade more often | Lower `min_score_threshold` | `trading` |
-| Trade less in choppy markets | Raise `accumulation_compression` threshold | `trading.regime_thresholds` |
-| Risk more per trade | Raise `risk_per_trade_pct` | `risk` |
-| Take profit earlier | Lower `tp1_r_multiple` | `exit` |
-| Tighter trailing stop | Lower `trailing_atr_multiplier` | `exit` |
-| Require stronger trend | Raise `adx_trending_threshold` | `regime` |
-| Filter lower volume pairs | Raise `min_24h_volume_usdt` | `filters` |
+| Term | Definition |
+|---|---|
+| **R-multiple** | Profit/loss expressed in units of initial risk (1R = 1× stop distance) |
+| **MFE** | Maximum Favorable Excursion — best price reached during trade |
+| **MAE** | Maximum Adverse Excursion — worst price reached during trade |
+| **VaR** | Value-at-Risk — maximum expected loss at given confidence level |
+| **CVaR** | Conditional VaR — expected loss beyond VaR (tail risk) |
+| **Sharpe Ratio** | Risk-adjusted return (excess return / volatility) |
+| **Sortino Ratio** | Risk-adjusted return (excess return / downside volatility) |
+| **Calmar Ratio** | Return / max drawdown |
+| **Kelly Fraction** | Optimal bet size as fraction of bankroll |
+| **PF** | Profit Factor — gross profit / gross loss |
+| **ATR** | Average True Range — volatility measure |
+| **OI** | Open Interest — total outstanding contracts |
+| **BOS** | Break of Structure — market structure change |
+| **CHoCH** | Change of Character — trend reversal signal |
+
+---
+
+For setup instructions, see [SETUP.md](SETUP.md).
+For the full strategy architecture, see [STRATEGY_STACK.md](STRATEGY_STACK.md).

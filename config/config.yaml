@@ -9,14 +9,14 @@ exchange:
   api_key: ""                      # Set via .env: BINANCE_API_KEY
   api_secret: ""                   # Set via .env: BINANCE_API_SECRET
   recv_window: 10000
-  # fapi_base_url: "https://fapi1.binance.com"   # Uncomment if fapi.binance.com is blocked
+  fapi_base_url: "https://fapi.binance.com"     # fapi1/2/3 blocked in ID; fapi.binance.com works
 
 trading:
   mode: paper                      # paper | live | backtest
   exploration_mode: false          # false = paper validates production gates instead of taking exploratory losses
   base_currency: USDT
-  paper_starting_equity: 1000      # Reset fresh paper run from $1000
-  paper_state_reset_token: "sample_collection_1000_2026_05_25"
+  paper_starting_equity: 100       # Reset fresh paper run from $100
+  paper_state_reset_token: "reset_100_2026_05_29"
   # ── AGGRESSIVE-EDGE TUNING (2026-05) ────────────────────────────────────
   # Bot now imports cleanly; we widen sampling so lifecycle can collect samples.
   # Regime + smart-money gates remain active; EV is observed but not gating
@@ -30,9 +30,9 @@ trading:
   signal_confirmation_scans: 1     # Faster reaction for paper edge discovery
   signal_max_age_seconds: 300      # expire signal if not confirmed within 5 min
   regime_thresholds:               # Per-regime override of min_score_threshold
-    trending_expansion: 50         # Was 52 — high-quality trending setups should not be choked
-    accumulation_compression: 50   # Compression breakouts now enabled below
-    distribution: 52               # Slight raise — short reversals are higher-risk
+    trending_expansion: 42          # Relaxed for paper sample collection (was 50)
+    accumulation_compression: 42   # Relaxed for paper sample collection (was 50)
+    distribution: 45               # Relaxed for paper sample collection (was 52)
 
 # ── Paper Validation Throughput ──────────────────────────────────────────────
 # Purpose: collect enough samples in paper mode without weakening live-mode
@@ -72,14 +72,15 @@ paper_validation:
     - compression_breakout
   allowed_long_strategy_sleeves:
     - trend_following
+    - compression_breakout           # Added: longs currently have 1 entry path; shorts have 3
   allowed_short_strategy_sleeves:
     - trend_following
     - reversal
     - compression_breakout
   max_open_trades_override: 5
   top_pairs_to_trade_override: 5
-  threshold_relaxation: 15.0
-  min_score_floor: 35.0
+  threshold_relaxation: 22.0          # Increased from 15.0 for paper sample collection
+  min_score_floor: 28.0              # Lowered from 35.0 for paper sample collection
   ev_hard_gate_min_trades: 40     # After this, EV relax is disabled; only positive EV passes
   ml_hard_gate_min_trades: 999
   ev_relax_score_buffer: 3.0
@@ -93,13 +94,15 @@ paper_validation:
   stress_min_ev_net_pct: 0.0                # During stress, relaxed samples must be non-negative EV
   loss_streak_guard_enabled: true           # Paper-only: no halt/cooldown, but wait for cleaner setups when losing
   loss_streak_guard_daily_loss_pct: -2.0
-  loss_streak_guard_consecutive_losses: 2
-  loss_streak_guard_min_score_buffer: 8.0
+  loss_streak_guard_consecutive_losses: 4   # Relaxed from 2 for paper sample collection
+  loss_streak_guard_streak_daily_pnl_pct: 0.0 # Streak-only guard needs non-positive day or drawdown below
+  loss_streak_guard_streak_drawdown_pct: 2.0 # Prevent stale streaks from choking green/equity-healthy days
+  loss_streak_guard_min_score_buffer: 4.0   # Relaxed from 8.0 for paper sample collection
   loss_streak_guard_min_setup_quality: 68.0
   loss_streak_guard_require_ev: true
   loss_streak_guard_min_p_win: 0.42
   loss_streak_guard_min_ev_net_pct: 0.0
-  loss_streak_guard_max_total_scale: 0.35   # Do not increase size while losing; collect smaller samples only
+  loss_streak_guard_max_total_scale: 0.50   # Relaxed from 0.35 for paper sample collection
   experimental_setup_stress_block_enabled: true # Pause unproven setup cohorts on bad paper days
   experimental_setup_stress_block_daily_loss_pct: -3.0
   experimental_setup_stress_block_consecutive_losses: 3
@@ -110,6 +113,27 @@ paper_validation:
   ev_observation_floor_enabled: true        # Even with EV gate off, block very low-probability deep-negative EV samples
   ev_observation_min_p_win: 0.30            # Floor from IN/USDT postmortem: avoid spending risk on <30% p_win ideas
   ev_observation_max_deficit_pct: 0.75      # Block only when net EV deficit is materially worse than -0.75%
+  market_context_guard_enabled: true        # Paper-only: block market contexts with clearly negative realised math
+  blocked_market_rotation_states:
+    - alts_outperforming
+  blocked_market_context_states: []
+  cohort_exploration_enabled: true          # Paper-only: tiny samples when cohort policy blocks otherwise clean trend setups
+  cohort_exploration_max_open: 1
+  cohort_exploration_max_total_scale: 0.25
+  cohort_exploration_min_score_buffer: 8.0
+  cohort_exploration_min_setup_quality: 64.0
+  cohort_exploration_min_p_win: 0.55
+  cohort_exploration_min_ev_net_pct: -0.25
+  cohort_exploration_stop_daily_loss_pct: -1.0
+  cohort_exploration_stop_consecutive_losses: 2
+  cohort_exploration_allowed_directions:
+    - long
+  cohort_exploration_allowed_regimes:
+    - trending_expansion
+  cohort_exploration_allowed_sleeves:
+    - trend_following
+  cohort_exploration_allowed_setup_types:
+    - trend_continuation
   positive_ev_probe_enabled: true          # Paper-only: sample strong positive-EV liquidity-sweep shorts below score floor
   positive_ev_probe_min_ev_net_pct: 0.50    # Net EV must be meaningfully positive after costs
   positive_ev_probe_min_p_win: 0.50         # Positive-EV sweep probes may start at break-even probability
@@ -159,7 +183,7 @@ risk:
   min_rr_ratio: 1.8                # LOWERED from 2.0 — allows high WR setups with 1.8R min
   max_leverage: 12                 # UPGRADED: allow up to 12x on high-conviction
   default_leverage: 6              # UPGRADED from 5x
-  stop_loss_atr_multiplier: 1.3    # TIGHTENED from 1.5 — tighter SL = smaller R, better RR
+  stop_loss_atr_multiplier: 2.0    # WIDENED from 1.3 — audit shows 6/7 SL trades were profitable before stop; tighter SL was noise, not edge
   max_stop_distance_pct: 50.0       # Reject abnormal ATR stops/negative short TPs on microcaps
   min_notional_usd: 5.0            # Binance Futures minimum order notional
   min_risk_usd: 0.50               # Paper-account floor; lets Brain/FundManager scale-down matter on $70 equity
@@ -196,25 +220,26 @@ exit:
   # Ref: arXiv:1609.00869 "Bayesian Analysis of Drawdown Distributions"
   early_cut:
     enabled: true
-    min_age_s: 420                # FASTER from 600 (7 min) — cut losers sooner
-    max_age_s: 5400               # REDUCED from 7200 (1.5h) — don't hold dead trades
-    mae_r_threshold: 0.55         # TIGHTER from 0.65 — cut at 55% of risk distance
-    mfe_r_ceiling: 0.15           # TIGHTER from 0.20 — trade never showed life
+    min_age_s: 900                # RELAXED from 420 — audit shows trades cut <15min had 0% WR; give trades time to develop
+    max_age_s: 7200               # RELAXED from 5400 — 2h window instead of 1.5h
+    mae_r_threshold: 0.75         # RELAXED from 0.55 — wider SL means R is bigger; don't cut in noise zone
+    mfe_r_ceiling: 0.30           # RELAXED from 0.15 — allow trades that showed some life to continue
+    long_min_age_s: 1800          # Longs need more time: audit shows long winner held 8h; long losers cut at 0.5h avg
 
   # ── Passport contract monitor ───────────────────────────────────────
   # Entry passport is the setup contract.  Before TP1, close paper/live
   # positions that spend too much R without following their expected path.
   passport_monitor:
     enabled: true
-    min_age_s: 600
-    trend_failure_mae_r: 0.70
-    trend_mfe_ceiling_r: 0.20
-    experimental_continuation_failure_mae_r: 0.50 # MTF/VWAP cohorts must follow through faster than generic trend
-    experimental_continuation_mfe_ceiling_r: 0.35
-    breakout_failure_mae_r: 0.45
-    breakout_mfe_ceiling_r: 0.25
-    reversal_failure_mae_r: 0.50
-    reversal_mfe_ceiling_r: 0.20
+    min_age_s: 900                  # RELAXED from 600 — align with early_cut min_age
+    trend_failure_mae_r: 0.80       # RELAXED from 0.70 — wider SL = bigger R; don't cut in noise
+    trend_mfe_ceiling_r: 0.30       # RELAXED from 0.20 — allow trades that showed momentum
+    experimental_continuation_failure_mae_r: 0.65 # RELAXED from 0.50 — wider SL gives more room
+    experimental_continuation_mfe_ceiling_r: 0.40 # RELAXED from 0.35
+    breakout_failure_mae_r: 0.60                  # RELAXED from 0.45 — wider SL gives more room
+    breakout_mfe_ceiling_r: 0.30                  # RELAXED from 0.25
+    reversal_failure_mae_r: 0.65                  # RELAXED from 0.50
+    reversal_mfe_ceiling_r: 0.30                  # RELAXED from 0.20
 
 exit_profiles:
   trend_following:
@@ -226,7 +251,8 @@ exit_profiles:
     trail_size_pct: 0.40                 # INCREASED from 0.30 — big trailing allocation
     breakeven_trigger_r: 0.8             # FASTER from 1.0
     trailing_atr_multiplier: 1.6         # TIGHTER from 1.8, regime-adaptive handles the rest
-    max_hold_duration_s: 345600          # 4 days (was 3)
+    max_hold_duration_s: 345600          # 4 days — longs need time to develop (audit: winner held 8h)
+    max_hold_duration_s_short: 28800     # 8h for shorts — audit: shorts held 8-24h are 0% WR, 3-8h is the sweet spot
   compression_breakout:
     tp1_r_multiple: 1.5                  # UPGRADED from 1.4
     tp2_r_multiple: 2.8                  # UPGRADED from 2.3
@@ -251,6 +277,9 @@ exit_profiles:
 filters:
   min_24h_volume_usdt: 50_000_000   # Expanded universe; keep liquidity floor, no trading-logic change
   min_price_usdt: 0.001
+  max_entry_spread_pct: 0.15        # Skip entry if bid-ask spread > 0.15% (audit: slippage = 48% of gross loss)
+  blocked_sessions:                  # Hard block: audit shows 8 trades / -$16.81 / 12.5% WR
+    - asia
   blacklisted_pairs:
     - USDCUSDT
     - BUSDUSDT
@@ -372,11 +401,11 @@ strategy:
   short_reversal_min_structure: 58
   short_reversal_min_volume: 35
   # ── Phase D / Liq Sweep dedicated short setups ─────────────────────────
-  # Ported from kiosarwin/Futures where these are the primary statistical
+  # Ported from quantedge where these are the primary statistical
   # edge cohorts (`IMMINENT_DUMP + PHASE_D` and `IMMINENT_DUMP + LIQ_SWEEP`).
   # Admits shorts via price-structure thesis without requiring
   # regime=='distribution', but still respects volatility / volume floors.
-  enable_short_setups: true
+  enable_short_setups: false       # Paused: phase_d paper audit showed negative edge; keep as observer only
   short_setup_min_confidence: 0.65   # detector confidence threshold (0–1)
   short_setup_min_structure: 50      # below this, breakdown is too noisy
   short_setup_max_volatility: 85     # block extreme-volatility chase prints
@@ -584,6 +613,73 @@ edge_detector:
   mode: soft_gate
   min_sample_for_gate: 40               # n below this: pseudo-edge downgraded to REDUCE_SIZE (never BLOCK)
   global_baseline_winrate: 0.50         # fallback baseline when pair/regime samples < 5
+
+# ── Loss Contributor Guard ──────────────────────────────────────────────────
+# Soft penalties from realised paper attribution: avoid spending normal risk on
+# contexts currently causing the largest losses while keeping learning alive.
+loss_contributor_guard:
+  enabled: true
+  mixed_rotation_score_mult: 0.97           # Relaxed from 0.94 for paper sample collection
+  mixed_rotation_size_mult: 0.85            # Relaxed from 0.80
+  mixed_rotation_threshold_shift: 3.0       # Relaxed from 5.0
+  missing_sector_rotation_score_mult: 0.98  # Relaxed from 0.96
+  missing_sector_rotation_size_mult: 0.80
+  missing_sector_rotation_threshold_shift: 3.0
+  probation_score_mult: 0.92
+  probation_size_mult: 0.65
+  probation_threshold_shift: 6.0
+  short_nonpositive_ev_score_mult: 0.90
+  short_nonpositive_ev_size_mult: 0.70
+  short_nonpositive_ev_threshold_shift: 4.0
+  short_unsupported_rotation_score_mult: 0.94
+  short_unsupported_rotation_size_mult: 0.75
+  short_unsupported_rotation_threshold_shift: 4.0
+  # Alts outperforming while BTC drops = -$16.78 / 0% WR (3 trades)
+  alts_btc_down_score_mult: 0.85
+  alts_btc_down_size_mult: 0.50
+  alts_btc_down_threshold_shift: 10.0
+  probation_sectors:
+    - depin
+    - commodity
+    - l1
+  probation_symbols:
+    - GRASS
+    - XAU
+    - HANA
+    - GUA
+    - INJ
+  # Session penalties: Asia session is -$16.81 / 12.5% WR across 8 trades
+  session_penalties:
+    asia:
+      score_mult: 0.88
+      size_mult: 0.60
+      threshold_shift: 8.0
+    overlap_london_ny:
+      score_mult: 0.96
+      size_mult: 0.85
+      threshold_shift: 3.0
+
+# ── Short Macro Overlay ──────────────────────────────────────────────────────
+# Soft ranking/sizing overlay for shorts. It rewards shorts only when broad
+# crypto tape confirms: BTC down, BTC.D down, TOTAL weak, and sector rotation
+# rotating out/weakening. It penalizes shorts in risk-on or sector-strong tape.
+short_macro_overlay:
+  enabled: true
+  strong_score_mult: 1.06
+  strong_size_mult: 1.08
+  strong_threshold_shift: -2.0
+  supportive_score_mult: 1.03
+  supportive_size_mult: 1.03
+  supportive_threshold_shift: -1.0
+  hostile_score_mult: 0.95                  # Relaxed from 0.92 for paper sample collection
+  hostile_size_mult: 0.80                   # Relaxed from 0.75
+  hostile_threshold_shift: 3.0              # Relaxed from 4.0
+  require_sector_confirmation_for_boost: true
+  min_sector_confidence: 0.35
+  boost_setup_types:
+    - trend_continuation
+    - liquidity_sweep_reversal
+    - compression_breakout
 
 # ── Probabilistic EV Model ───────────────────────────────────────────────────
 ev_model:

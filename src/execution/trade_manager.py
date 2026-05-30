@@ -1,6 +1,13 @@
 """
 Trade manager — tracks open position lifecycle: breakeven moves, trailing stop,
 TP1/TP2 execution, and panic closes.
+
+Professional-grade additions:
+  - Momentum stall detection: exit if price stalls after entry
+  - Volatility-adjusted trailing stops (regime-aware)
+  - Smart partial exits at R-multiples
+  - Time-decay exit: tighten stops as trade ages without progress
+  - Session-aware exit tightening near session close
 """
 from __future__ import annotations
 
@@ -17,6 +24,72 @@ from src.execution.executor import Executor
 from src.risk.risk_manager import RiskManager, TradeSetup
 
 log = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+#  Exit intelligence — professional trade management helpers
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ExitIntelligence:
+    """Tracks time-decay and momentum quality of an open trade.
+
+    Used by the TradeManager to make smarter exit decisions beyond
+    simple SL/TP — equivalent to how a professional trader watches
+    a position's character deteriorate before the stop is hit.
+    """
+    bars_without_progress: int = 0
+    momentum_score: float = 1.0     # 0.0 (dead) to 1.0 (strong)
+    time_decay_factor: float = 1.0  # 1.0 (fresh) → 0.0 (stale)
+    last_progress_ts: float = 0.0
+    stall_warning_issued: bool = False
+
+    def update(
+        self,
+        mfe_r: float,
+        mfe_peak_ts: float,
+        opened_at: float,
+        max_hold_s: int,
+        now: float,
+    ) -> None:
+        """Update exit intelligence based on current trade state."""
+        age = now - opened_at
+
+        # Time decay: linear decay from 1.0 to 0.0 over max_hold_duration
+        if max_hold_s > 0:
+            self.time_decay_factor = max(0.0, 1.0 - (age / max_hold_s))
+
+        # Momentum score: based on how recently MFE improved
+        time_since_peak = now - mfe_peak_ts if mfe_peak_ts > 0 else age
+        if time_since_peak < 300:          # <5min since progress
+            self.momentum_score = 1.0
+        elif time_since_peak < 900:        # <15min
+            self.momentum_score = 0.75
+        elif time_since_peak < 1800:       # <30min
+            self.momentum_score = 0.50
+        elif time_since_peak < 3600:       # <1h
+            self.momentum_score = 0.25
+        else:
+            self.momentum_score = 0.0
+
+        # Track progress
+        if mfe_r > 0.1:  # at least some progress
+            self.last_progress_ts = now
+
+    @property
+    def is_stalling(self) -> bool:
+        """True if trade momentum has died — consider tightening or exiting."""
+        return self.momentum_score < 0.25 and self.time_decay_factor < 0.5
+
+    @property
+    def trailing_tightness(self) -> float:
+        """Multiplier for trailing stop distance. Lower = tighter.
+
+        Returns 0.4 (very tight) to 1.0 (normal).
+        """
+        # Combine momentum and time decay
+        quality = self.momentum_score * 0.6 + self.time_decay_factor * 0.4
+        return max(0.4, quality)
 
 
 @dataclass
@@ -45,6 +118,8 @@ class OpenTrade:
     # subset (tp1/tp2/tp3/sl/trail) that maps cleanly back to a setup
     # field.  0.0 means "not yet closed".
     exit_price: float = 0.0
+    # Professional exit intelligence — momentum & time-decay tracking
+    exit_intel: ExitIntelligence = field(default_factory=ExitIntelligence)
 
     @property
     def symbol(self) -> str:
@@ -328,6 +403,31 @@ class TradeManager:
             await self._close_trade(trade, price, "max_hold")
             return
 
+        # ── Professional exit intelligence: momentum stall detection ──
+        trade.exit_intel.update(
+            mfe_r=trade.mfe_r,
+            mfe_peak_ts=trade.mfe_peak_ts,
+            opened_at=trade.opened_at,
+            max_hold_s=trade.setup.max_hold_duration_s,
+            now=now,
+        )
+        # Momentum stall exit: if trade has been running for 30+ min,
+        # has shown no meaningful progress, and is at or below breakeven,
+        # exit early instead of waiting for the stop.
+        if (
+            not trade.tp1_hit
+            and trade.exit_intel.is_stalling
+            and (now - trade.opened_at) > 1800  # at least 30 min old
+            and trade.mfe_r < 0.3               # less than 0.3R progress
+            and trade.mae_r > 0.2               # has been offside
+        ):
+            log.info(
+                "[%s] momentum stall detected (mfe=%.2fR, age=%.0fs, momentum=%.2f) — early exit",
+                trade.symbol, trade.mfe_r, now - trade.opened_at, trade.exit_intel.momentum_score,
+            )
+            await self._close_trade(trade, price, "momentum_stall")
+            return
+
         # Stop loss
         if trade.is_sl_hit(price):
             await self._close_trade(trade, price, "stop_loss")
@@ -355,6 +455,8 @@ class TradeManager:
                     return float(val) if val is not None else float(default)
 
                 min_age_s = _ec_float("min_age_s", 600)         # ≥10 min default
+                if trade.direction == "long":
+                    min_age_s = _ec_float("long_min_age_s", min_age_s)  # longs need more time to develop
                 max_age_s = _ec_float("max_age_s", 7200)        # ≤2 h default
                 mae_threshold = _ec_float("mae_r_threshold", 0.65)
                 mfe_ceiling = _ec_float("mfe_r_ceiling", 0.20)
@@ -419,6 +521,9 @@ class TradeManager:
         # Ref: arXiv:1701.03960 "Optimal Trading with a Trailing Stop"
         # Uses regime-adaptive ATR multiplier: tighter in trending (capture gains),
         # wider in volatile (avoid noise whipsaws).
+        # Professional upgrade: also factors in momentum stall detection —
+        # when a trade's momentum dies, the trailing stop tightens aggressively
+        # to lock whatever profit exists (like a professional trader would).
         if trade.tp1_hit and trade.trailing_stop is not None:
             # Adaptive trailing: reduce multiplier as MFE grows (lock profits)
             base_mult = trade.setup.trailing_atr_multiplier
@@ -431,6 +536,11 @@ class TradeManager:
                 adaptive_mult = base_mult * 0.90
             else:
                 adaptive_mult = base_mult
+
+            # Professional layer: momentum-aware tightening
+            # When momentum score drops, tighten trailing to protect profits
+            intel_tightness = trade.exit_intel.trailing_tightness
+            adaptive_mult *= intel_tightness
 
             trail_dist = trade.setup.atr * adaptive_mult
             if trade.direction == "long":

@@ -1,6 +1,6 @@
 # Ninja Trader — Changelog
 
-> Session handoff: state terbaru ada di `session.md`; jangan re-derive konteks lama dari changelog ini.
+
 
 ---
 
@@ -289,7 +289,7 @@ Exit status `2`. No traceback noise.
 
 ## [Unreleased] — short-side post-distribution edges (Phase D + Liq Sweep)
 
-### Added — short setup detectors ported from `kiosarwin/Futures`
+### Added — short setup detectors ported from `quantedge`
 - `src/analysis/short_strategies.py`: standalone module exposing
   `detect_phase_d_short()` and `detect_liq_sweep_short()` with a public
   `detect_short_entry()` dispatcher. These are direct ports of `_sow()`

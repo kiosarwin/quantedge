@@ -6,21 +6,21 @@
 
 ## 1. Gambaran Besar
 
-Ninja Trader adalah sistem trading crypto perpetual futures dua arah. Ini bukan bot satu sinyal. Entry hanya boleh terjadi setelah kandidat melewati beberapa layer:
+QuantEdge is a two-directional crypto perpetual futures trading system. This is not a single-signal bot. Entry can only occur after the candidate passes through multiple layers:
 
-1. Scanner memilih pair futures yang likuid.
-2. Market data membangun snapshot pair dan konteks pasar luas.
-3. Scorer menghitung score pair.
-4. Strategy router memilih sleeve strategi.
-5. Setup passport dibuat sebagai kontrak tesis trade.
-6. Paper/live admission policy menentukan apakah kandidat boleh diuji.
-7. Cohort policy dan strategy lifecycle mengecek kesehatan pola historis.
-8. ML, fund manager, adaptive brain, session, dan edge detector memodulasi veto/size.
-9. Risk guard, sector guard, direction guard, dan correlation guard melindungi akun.
-10. Jika slot penuh, position rotation boleh mengganti posisi lemah dengan kandidat jauh lebih kuat.
-11. Trade manager mengelola TP, trailing, early cut, passport monitor, close, dan persistence.
+1. Scanner selects liquid futures pairs.
+2. Market data builds pair snapshot and broad market context.
+3. Scorer computes pair score.
+4. Strategy router selects strategy sleeve.
+5. Setup passport is created as a trade thesis contract.
+6. Paper/live admission policy determines whether the candidate can be tested.
+7. Cohort policy and strategy lifecycle check historical pattern health.
+8. ML, fund manager, adaptive brain, session, and edge detector modulate veto/size.
+9. Risk guard, sector guard, direction guard, and correlation guard protect the account.
+10. If slots are full, position rotation may replace weak positions with much stronger candidates.
+11. Trade manager handles TP, trailing, early cut, passport monitor, close, and persistence.
 
-Prinsip penting: signal bagus belum tentu boleh dieksekusi. Eksekusi hanya terjadi kalau tesis, konteks, risk budget, dan policy semuanya cukup sehat.
+Key principle: a good signal is not necessarily executable. Execution only occurs when thesis, context, risk budget, and policy are all sufficiently healthy.
 
 ## 2. Postur Saat Ini
 
@@ -282,7 +282,7 @@ Kenapa penting: trade tidak lagi hanya menyimpan label sleeve. Trade menyimpan t
 
 File: [`src/analysis/short_strategies.py`](./src/analysis/short_strategies.py)
 
-Dedicated short setup berasal dari pola yang dulu penting di `kiosarwin/Futures`, terutama `IMMINENT_DUMP + PHASE_D` dan `IMMINENT_DUMP + LIQ_SWEEP`.
+Dedicated short setup berasal dari pola yang dulu penting di `quantedge`, terutama `IMMINENT_DUMP + PHASE_D` dan `IMMINENT_DUMP + LIQ_SWEEP`.
 
 `phase_d`:
 
@@ -298,7 +298,9 @@ Dedicated short setup berasal dari pola yang dulu penting di `kiosarwin/Futures`
 - candle close kembali di bawah pool
 - upper wick dan bearish body menunjukkan rejection
 
-Short setup confidence tinggi bisa masuk `reversal` tanpa harus selalu `regime == distribution`, karena tesisnya sering berupa transisi dari distribution menuju markdown.
+Status runtime saat ini: dedicated short setup ini sedang **dipause dari entry** lewat `strategy.enable_short_setups: false` karena audit paper terbaru menunjukkan `phase_d` sebagai loss contributor terbesar (`4` trade, net `-$19.62`, PF `0.03`). Detector dan telemetry masih berguna sebagai observer/diagnostic, tetapi tidak boleh mengonsumsi paper/live risk sampai forward observer evidence membaik.
+
+Short setup confidence tinggi secara desain historis bisa masuk `reversal` tanpa harus selalu `regime == distribution`, karena tesisnya sering berupa transisi dari distribution menuju markdown. Namun selama pause ini, jalur tersebut tidak aktif untuk dedicated `phase_d` / legacy `liq_sweep`; isolated `liquidity_sweep_reversal` yang punya reclaim detector sendiri tetap terpisah.
 
 ## 11. EV Model dan Paper Validation
 
@@ -701,7 +703,8 @@ Metrik prioritas:
 - expectancy by `risk_on_state`
 - expectancy by `rotation_state`
 - expectancy by `BTC trend x ETH/BTC trend`
-- PnL by short setup label (`phase_d`, `liq_sweep`)
+- PnL by short setup label (`phase_d`, `liq_sweep`) as observer evidence while dedicated short setups are paused
+- frequency and impact of `loss_guard=...` penalties (`mixed_rotation`, missing sector rotation, probation sector/symbol, unsupported short)
 - win rate dan profit factor by cohort
 - stop-hit rate
 - TP1-hit rate
@@ -745,15 +748,11 @@ Sebelum mengambil keputusan baru:
 ```bash
 git status --short --branch
 ./venv/bin/python -c "from src.main import load_config, normalize_config; cfg=normalize_config(load_config('config/config.yaml')); print(cfg['trading']['paper_starting_equity'], cfg['risk']['min_risk_usd'], cfg['risk']['max_direction_risk_pct'], cfg['trading']['max_open_trades'], cfg['trading']['min_score_threshold'])"
-ssh gcp-futures 'cd /home/kiosarwin/ninja_trader && screen -ls'
-ssh gcp-futures 'pgrep -af "python -m src.main|python -m src|venv/bin/python -m src"'
-ssh gcp-futures 'cd /home/kiosarwin/ninja_trader && tail -n 120 logs/boot.log'
 ```
 
 Untuk cek open trade passport:
 
 ```bash
-ssh gcp-futures 'cd /home/kiosarwin/ninja_trader && ./venv/bin/python -c "import json; data=json.load(open(\"data/open_trades.json\")); trades=data.get(\"trades\", []); print(\"open\", len(trades)); [print((t.get(\"setup\") or {}).get(\"symbol\"), bool(((t.get(\"setup\") or {}).get(\"setup_passport\"))), bool((((t.get(\"setup\") or {}).get(\"setup_passport\") or {}).get(\"market_context\")))) for t in trades]"'
 ```
 
 Focused tests yang sering relevan untuk area ini:

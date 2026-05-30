@@ -1,8 +1,16 @@
 """
 Trade attribution helpers for strategy sleeves, regimes, and directions.
+
+Professional-grade additions:
+  - Risk-adjusted performance metrics (Sharpe, Sortino, Calmar)
+  - VaR / CVaR from trade return distribution
+  - Kelly criterion calculation
+  - Streak analysis and recovery metrics
 """
 from __future__ import annotations
 
+import math
+import statistics
 from dataclasses import dataclass, asdict
 from typing import Callable
 from src.models.strategy_passport import sector_for_asset, asset_from_symbol
@@ -157,6 +165,138 @@ def summarize_grouped(trade_log: list, key_fn: Callable[[object], str], min_trad
     return rows
 
 
+@dataclass
+class RiskAdjustedMetrics:
+    """Professional-grade risk-adjusted performance metrics.
+
+    Equivalent to what an institutional fund reports to investors.
+    """
+    sharpe_ratio: float = 0.0         # annualized (risk-free = 0)
+    sortino_ratio: float = 0.0        # annualized, downside deviation only
+    calmar_ratio: float = 0.0         # annualized return / max drawdown
+    var_95_pct: float = 0.0           # 95% VaR as % of equity
+    var_99_pct: float = 0.0           # 99% VaR
+    cvar_95_pct: float = 0.0          # 95% Conditional VaR (expected shortfall)
+    cvar_99_pct: float = 0.0          # 99% Conditional VaR
+    max_drawdown_pct: float = 0.0     # worst peak-to-trough
+    kelly_criterion: float = 0.0      # optimal bet fraction
+    payoff_ratio: float = 0.0         # avg_win / abs(avg_loss)
+    tail_risk_score: float = 0.0      # 0-100, higher = fatter tails
+    volatility_annualized: float = 0.0
+    downside_deviation: float = 0.0
+    recovery_factor: float = 0.0      # net profit / max drawdown
+    max_consecutive_losses: int = 0
+    max_consecutive_wins: int = 0
+    avg_trade_duration_s: float = 0.0
+    sample_size: int = 0
+
+
+def compute_risk_adjusted_metrics(trade_log: list) -> RiskAdjustedMetrics:
+    """Compute institutional-grade risk-adjusted metrics from trade log.
+
+    This is what a professional quant fund reports alongside raw P&L.
+    """
+    m = RiskAdjustedMetrics()
+    if len(trade_log) < 3:
+        m.sample_size = len(trade_log)
+        return m
+
+    # Extract returns (% of equity per trade)
+    returns = []
+    durations = []
+    for t in trade_log:
+        pnl_pct = float(getattr(t, "pnl_pct", 0.0) or 0.0)
+        returns.append(pnl_pct)
+        opened = float(getattr(t, "opened_at", 0.0) or 0.0)
+        closed = float(getattr(t, "closed_at", 0.0) or 0.0)
+        if opened > 0 and closed > opened:
+            durations.append(closed - opened)
+
+    m.sample_size = len(returns)
+    m.avg_trade_duration_s = statistics.mean(durations) if durations else 0.0
+
+    # --- Basic stats ---
+    wins = [r for r in returns if r > 0]
+    losses = [r for r in returns if r < 0]
+    avg_win = statistics.mean(wins) if wins else 0.0
+    avg_loss = statistics.mean(losses) if losses else 0.0
+    m.payoff_ratio = abs(avg_win / avg_loss) if avg_loss != 0 else 0.0
+
+    # --- Win/loss streaks ---
+    max_win_streak = max_loss_streak = 0
+    current_win = current_loss = 0
+    for r in returns:
+        if r > 0:
+            current_win += 1
+            current_loss = 0
+            max_win_streak = max(max_win_streak, current_win)
+        else:
+            current_loss += 1
+            current_win = 0
+            max_loss_streak = max(max_loss_streak, current_loss)
+    m.max_consecutive_wins = max_win_streak
+    m.max_consecutive_losses = max_loss_streak
+
+    # --- Kelly criterion ---
+    win_rate = len(wins) / len(returns) if returns else 0.0
+    if win_rate > 0 and m.payoff_ratio > 0:
+        m.kelly_criterion = max(0.0, (win_rate * m.payoff_ratio - (1 - win_rate)) / m.payoff_ratio)
+
+    # --- Volatility ---
+    if len(returns) >= 2:
+        m.volatility_annualized = statistics.stdev(returns) * math.sqrt(252)
+        downside = [r for r in returns if r < 0]
+        m.downside_deviation = statistics.stdev(downside) * math.sqrt(252) if len(downside) >= 2 else 0.0
+
+    # --- Risk-adjusted returns ---
+    if m.volatility_annualized > 0:
+        mean_annual = statistics.mean(returns) * 252
+        m.sharpe_ratio = mean_annual / m.volatility_annualized
+    if m.downside_deviation > 0:
+        mean_annual = statistics.mean(returns) * 252
+        m.sortino_ratio = mean_annual / m.downside_deviation
+
+    # --- VaR / CVaR (historical simulation) ---
+    sorted_returns = sorted(returns)
+    n = len(sorted_returns)
+    idx_95 = max(0, int(n * 0.05))
+    idx_99 = max(0, int(n * 0.01))
+    m.var_95_pct = abs(sorted_returns[idx_95])
+    m.var_99_pct = abs(sorted_returns[idx_99])
+    tail_95 = sorted_returns[:idx_95 + 1]
+    tail_99 = sorted_returns[:idx_99 + 1]
+    m.cvar_95_pct = abs(statistics.mean(tail_95)) if tail_95 else m.var_95_pct
+    m.cvar_99_pct = abs(statistics.mean(tail_99)) if tail_99 else m.var_99_pct
+
+    # --- Tail risk score ---
+    if m.var_95_pct > 0:
+        tail_ratio = m.cvar_95_pct / m.var_95_pct
+        m.tail_risk_score = min(100.0, max(0.0, (tail_ratio - 1.0) * 200.0))
+
+    # --- Max drawdown from equity curve ---
+    cumulative = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for r in returns:
+        cumulative += r
+        if cumulative > peak:
+            peak = cumulative
+        dd = peak - cumulative
+        max_dd = max(max_dd, dd)
+    m.max_drawdown_pct = max_dd
+
+    # --- Calmar ratio ---
+    if m.max_drawdown_pct > 0:
+        mean_annual = statistics.mean(returns) * 252
+        m.calmar_ratio = mean_annual / (m.max_drawdown_pct / 100.0)
+
+    # --- Recovery factor ---
+    if m.max_drawdown_pct > 0:
+        m.recovery_factor = sum(returns) / (m.max_drawdown_pct / 100.0)
+
+    return m
+
+
 def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
     by_sleeve = summarize_grouped(trade_log, lambda t: _safe_sleeve(t), min_trades=min_trades)
     by_setup_type = summarize_grouped(trade_log, lambda t: _safe_setup_type(t), min_trades=min_trades)
@@ -213,6 +353,9 @@ def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
         min_trades=min_trades,
     )
 
+    # Professional-grade risk-adjusted metrics
+    risk_metrics = compute_risk_adjusted_metrics(trade_log)
+
     return {
         "by_sleeve": [asdict(r) for r in by_sleeve],
         "by_setup_type": [asdict(r) for r in by_setup_type],
@@ -232,6 +375,7 @@ def build_attribution_report(trade_log: list, min_trades: int = 2) -> dict:
         "by_exit_profile_regime_side": [asdict(r) for r in by_exit_profile_regime_side],
         "by_sleeve_regime_side": [asdict(r) for r in by_sleeve_regime_side],
         "by_setup_type_regime_side": [asdict(r) for r in by_setup_type_regime_side],
+        "risk_adjusted_metrics": asdict(risk_metrics),
         "headline": {
             "best_sleeve": by_sleeve[0].key if by_sleeve else None,
             "worst_sleeve": by_sleeve[-1].key if by_sleeve else None,

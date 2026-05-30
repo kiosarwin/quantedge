@@ -115,6 +115,12 @@ def test_dataset_logger_extracts_market_context_fields():
         strategy_sleeve="trend_following",
         setup_type="trend_continuation",
         setup_quality_score=68.0,
+        short_macro_state="strong_broad_unwind",
+        short_macro_score=8.5,
+        short_macro_reason="short_macro=strong_broad_unwind:btc_down+btc_d_down",
+        short_macro_score_mult=1.06,
+        short_macro_size_mult=1.08,
+        short_macro_threshold_shift=-2.0,
     )
     snap = SimpleNamespace(
         spot_context=None,
@@ -147,6 +153,12 @@ def test_dataset_logger_extracts_market_context_fields():
     assert fields["sector_rotation_relative_btc_pct"] == 3.2
     assert fields["sector_rotation_breadth"] == 0.75
     assert fields["sector_rotation_confidence"] == 0.68
+    assert fields["short_macro_state"] == "strong_broad_unwind"
+    assert fields["short_macro_score"] == 8.5
+    assert fields["short_macro_reason"] == "short_macro=strong_broad_unwind:btc_down+btc_d_down"
+    assert fields["short_macro_score_mult"] == 1.06
+    assert fields["short_macro_size_mult"] == 1.08
+    assert fields["short_macro_threshold_shift"] == -2.0
 
 
 def test_attribution_report_groups_market_context_from_scores():

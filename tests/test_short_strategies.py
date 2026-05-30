@@ -1,7 +1,7 @@
 """Unit tests for Phase D and Liq Sweep short detectors.
 
 These detectors port the post-distribution short edges from
-``kiosarwin/Futures``. The tests build small synthetic OHLCV frames that
+``quantedge``. The tests build small synthetic OHLCV frames that
 satisfy or violate each rule individually so a regression on a specific
 gate is immediately visible.
 """

@@ -1,6 +1,6 @@
 # Quant Operating Model
 
-> Session handoff: lihat `session.md` untuk state terbaru sebelum menafsirkan aturan operasi di bawah ini.
+> Session handoff: See the codebase and config for current operating state.
 
 ## Default posture
 

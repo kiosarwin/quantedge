@@ -47,7 +47,13 @@ from src.models.adaptive_brain import AdaptiveBrain
 from src.risk.correlation_filter import CorrelationFilter
 from src.risk.session_modulator import SessionModulator
 from src.data.dataset_logger import DatasetLogger
-from src.data.crypto_news import build_market_hot_narratives, fetch_crypto_news_highlights
+try:
+    from src.data.crypto_news import build_market_hot_narratives, fetch_crypto_news_highlights
+except Exception as exc:  # pragma: no cover - startup should stay alive without this feature
+    build_market_hot_narratives = None
+    fetch_crypto_news_highlights = None
+    log = logging.getLogger("ninja_trader")
+    log.warning("Crypto news helpers unavailable; market-hot report disabled: %s", exc)
 from src.analysis.rejection_logger import RejectionLogger
 from src.reporting.attribution import build_attribution_report
 from src.reporting.bootstrap import build_bootstrap_audit_report, format_bootstrap_audit_lines
@@ -63,6 +69,12 @@ def setup_passport_with_market_context(breakdown) -> dict:
     """Attach entry broad-market context to the persisted setup passport."""
     passport_obj = getattr(breakdown, "setup_passport", None)
     passport = dict(passport_obj.as_dict() if passport_obj is not None else {})
+    if bool(getattr(breakdown, "paper_cohort_exploration", False)):
+        passport.setdefault("paper_cohort_exploration", True)
+        passport.setdefault(
+            "paper_cohort_exploration_reason",
+            str(getattr(breakdown, "paper_cohort_exploration_reason", "") or ""),
+        )
     market_ctx = getattr(breakdown, "market_context", None)
     sector_rotation = getattr(breakdown, "sector_rotation", None)
     if sector_rotation is not None:
@@ -79,6 +91,21 @@ def setup_passport_with_market_context(breakdown) -> dict:
         passport.setdefault("sector_rotation_rank", rotation_context["rank"])
         passport.setdefault("sector_rotation_relative_btc_pct", rotation_context["relative_btc_pct"])
         passport.setdefault("sector_rotation_confidence", rotation_context["confidence"])
+    macro_context = {
+        "state": str(getattr(breakdown, "short_macro_state", "neutral") or "neutral"),
+        "score": float(getattr(breakdown, "short_macro_score", 0.0) or 0.0),
+        "reason": str(getattr(breakdown, "short_macro_reason", "") or ""),
+        "score_mult": float(getattr(breakdown, "short_macro_score_mult", 1.0) or 1.0),
+        "size_mult": float(getattr(breakdown, "short_macro_size_mult", 1.0) or 1.0),
+        "threshold_shift": float(getattr(breakdown, "short_macro_threshold_shift", 0.0) or 0.0),
+    }
+    passport.setdefault("short_macro_context", dict(macro_context))
+    passport.setdefault("short_macro_state", macro_context["state"])
+    passport.setdefault("short_macro_score", macro_context["score"])
+    passport.setdefault("short_macro_reason", macro_context["reason"])
+    passport.setdefault("short_macro_score_mult", macro_context["score_mult"])
+    passport.setdefault("short_macro_size_mult", macro_context["size_mult"])
+    passport.setdefault("short_macro_threshold_shift", macro_context["threshold_shift"])
     if market_ctx is None:
         return passport
 
@@ -137,6 +164,13 @@ def enrich_closed_trade_scores(scores: dict | None, trade, cfg: dict) -> dict:
     enriched.setdefault("market_btc_d_trend", passport.get("market_btc_d_trend") or passport_market_ctx.get("btc_d_trend", "unknown"))
     enriched.setdefault("market_total_trend", passport.get("market_total_trend") or passport_market_ctx.get("total_trend", "unknown"))
     enriched.setdefault("market_context_confidence", float(passport.get("market_context_confidence") or passport_market_ctx.get("confidence", 0.0) or 0.0))
+    passport_short_macro = passport.get("short_macro_context") if isinstance(passport.get("short_macro_context"), dict) else {}
+    enriched.setdefault("short_macro_state", passport.get("short_macro_state") or passport_short_macro.get("state", "neutral"))
+    enriched.setdefault("short_macro_score", float(passport.get("short_macro_score") or passport_short_macro.get("score", 0.0) or 0.0))
+    enriched.setdefault("short_macro_reason", passport.get("short_macro_reason") or passport_short_macro.get("reason", ""))
+    enriched.setdefault("short_macro_score_mult", float(passport.get("short_macro_score_mult") or passport_short_macro.get("score_mult", 1.0) or 1.0))
+    enriched.setdefault("short_macro_size_mult", float(passport.get("short_macro_size_mult") or passport_short_macro.get("size_mult", 1.0) or 1.0))
+    enriched.setdefault("short_macro_threshold_shift", float(passport.get("short_macro_threshold_shift") or passport_short_macro.get("threshold_shift", 0.0) or 0.0))
     enriched.setdefault("setup_passport", dict(passport))
     enriched.setdefault("strategy_sleeve", str(getattr(setup, "strategy_sleeve", "") or passport.get("sleeve", "")))
     enriched.setdefault("exit_profile", str(getattr(setup, "exit_profile", "") or ""))
@@ -564,6 +598,27 @@ class NinjaTrader:
         allowed, _reason = self._paper_trade_scope_check(breakdown)
         return allowed
 
+    def _paper_market_context_guard_check(self, breakdown: SignalBreakdown) -> tuple[bool, str]:
+        if not self._paper_validation_enabled():
+            return True, "paper validation disabled"
+        if not bool(self._paper_validation.get("market_context_guard_enabled", True)):
+            return True, "market context guard disabled"
+        market_ctx = getattr(breakdown, "market_context", None)
+        rotation = str(getattr(market_ctx, "rotation_state", "unknown") or "unknown")
+        risk_state = str(getattr(market_ctx, "risk_on_state", "unknown") or "unknown")
+        blocked_rotations = set(
+            self._paper_validation.get("blocked_market_rotation_states", []) or []
+        )
+        blocked_contexts = set(
+            self._paper_validation.get("blocked_market_context_states", []) or []
+        )
+        if rotation in blocked_rotations:
+            return False, f"market_rotation_state={rotation} blocked"
+        context_key = f"{risk_state}|{rotation}"
+        if context_key in blocked_contexts:
+            return False, f"market_context={context_key} blocked"
+        return True, "ok"
+
     def _paper_ml_hard_gate_min_trades(self) -> int:
         return int(
             self._paper_validation.get(
@@ -668,6 +723,7 @@ class NinjaTrader:
             return False
         risk_state = getattr(self._risk, "state", None)
         daily_pnl = float(getattr(risk_state, "daily_pnl_pct", 0.0) or 0.0)
+        drawdown = float(getattr(risk_state, "drawdown_pct", 0.0) or 0.0)
         consecutive_losses = int(getattr(risk_state, "consecutive_losses", 0) or 0)
         daily_trigger = float(
             self._paper_validation.get("loss_streak_guard_daily_loss_pct", -2.0) or -2.0
@@ -675,8 +731,22 @@ class NinjaTrader:
         streak_trigger = int(
             self._paper_validation.get("loss_streak_guard_consecutive_losses", 2) or 2
         )
+        streak_daily_trigger = float(
+            self._paper_validation.get("loss_streak_guard_streak_daily_pnl_pct", 0.0) or 0.0
+        )
+        streak_drawdown_trigger = float(
+            self._paper_validation.get("loss_streak_guard_streak_drawdown_pct", 2.0) or 2.0
+        )
         daily_active = daily_trigger < 0.0 and daily_pnl <= daily_trigger
-        streak_active = streak_trigger > 0 and consecutive_losses >= streak_trigger
+        streak_risk_off = (
+            daily_pnl <= streak_daily_trigger
+            or (streak_drawdown_trigger > 0.0 and drawdown >= streak_drawdown_trigger)
+        )
+        streak_active = (
+            streak_trigger > 0
+            and consecutive_losses >= streak_trigger
+            and streak_risk_off
+        )
         return daily_active or streak_active
 
     def _paper_loss_streak_guard_check(
@@ -729,6 +799,124 @@ class NinjaTrader:
             return max(0.05, float(cap))
         except (TypeError, ValueError):
             return 0.35
+
+    def _paper_cohort_exploration_open_count(self) -> int:
+        if not self._paper_validation_enabled():
+            return 0
+        trade_mgr = getattr(self, "_trade_mgr", None)
+        trades = getattr(trade_mgr, "open_trades", []) if trade_mgr is not None else []
+        count = 0
+        for trade in trades or []:
+            setup = getattr(trade, "setup", None)
+            passport = getattr(setup, "setup_passport", {}) or {}
+            if bool(passport.get("paper_cohort_exploration")):
+                count += 1
+        return count
+
+    def _paper_cohort_exploration_check(
+        self,
+        breakdown: SignalBreakdown,
+        threshold: float,
+    ) -> tuple[bool, str]:
+        if not self._paper_validation_enabled():
+            return False, "paper validation disabled"
+        if not bool(self._paper_validation.get("cohort_exploration_enabled", False)):
+            return False, "cohort exploration disabled"
+
+        risk_state = getattr(getattr(self, "_risk", None), "state", None)
+        daily_pnl = float(getattr(risk_state, "daily_pnl_pct", 0.0) or 0.0)
+        consecutive_losses = int(getattr(risk_state, "consecutive_losses", 0) or 0)
+        stop_daily = float(
+            self._paper_validation.get("cohort_exploration_stop_daily_loss_pct", -1.0) or -1.0
+        )
+        stop_losses = int(
+            self._paper_validation.get("cohort_exploration_stop_consecutive_losses", 2) or 2
+        )
+        if stop_daily < 0.0 and daily_pnl <= stop_daily:
+            return False, f"daily_pnl={daily_pnl:.2f}% <= {stop_daily:.2f}%"
+        if stop_losses > 0 and consecutive_losses >= stop_losses:
+            return False, f"consecutive_losses={consecutive_losses} >= {stop_losses}"
+
+        max_open = int(self._paper_validation.get("cohort_exploration_max_open", 1) or 1)
+        if max_open <= 0:
+            return False, "cohort exploration max open is zero"
+        open_count = self._paper_cohort_exploration_open_count()
+        if open_count >= max_open:
+            return False, f"cohort exploration max_open {open_count}/{max_open}"
+
+        direction = str(getattr(breakdown, "direction", "") or "")
+        regime = breakdown.regime.value if getattr(breakdown, "regime", None) else ""
+        sleeve = str(getattr(breakdown, "strategy_sleeve", "") or "neutral")
+        setup_type = str(getattr(breakdown, "setup_type", "") or "unknown")
+        allowed_dirs = set(
+            self._paper_validation.get("cohort_exploration_allowed_directions", ["long"])
+            or ["long"]
+        )
+        allowed_regimes = set(
+            self._paper_validation.get("cohort_exploration_allowed_regimes", ["trending_expansion"])
+            or ["trending_expansion"]
+        )
+        allowed_sleeves = set(
+            self._paper_validation.get("cohort_exploration_allowed_sleeves", ["trend_following"])
+            or ["trend_following"]
+        )
+        allowed_setup_types = set(
+            self._paper_validation.get("cohort_exploration_allowed_setup_types", ["trend_continuation"])
+            or ["trend_continuation"]
+        )
+        if direction not in allowed_dirs:
+            return False, f"direction={direction} not allowed"
+        if regime not in allowed_regimes:
+            return False, f"regime={regime or 'unknown'} not allowed"
+        if sleeve not in allowed_sleeves:
+            return False, f"sleeve={sleeve} not allowed"
+        if setup_type not in allowed_setup_types:
+            return False, f"setup_type={setup_type} not allowed"
+
+        min_buffer = float(
+            self._paper_validation.get("cohort_exploration_min_score_buffer", 8.0) or 8.0
+        )
+        min_quality = float(
+            self._paper_validation.get("cohort_exploration_min_setup_quality", 68.0) or 68.0
+        )
+        min_pwin = float(
+            self._paper_validation.get("cohort_exploration_min_p_win", 0.55) or 0.55
+        )
+        min_ev = float(
+            self._paper_validation.get("cohort_exploration_min_ev_net_pct", -0.25) or -0.25
+        )
+        score = float(getattr(breakdown, "total_score", 0.0) or 0.0)
+        quality = float(getattr(breakdown, "setup_quality_score", 0.0) or 0.0)
+        ev = getattr(breakdown, "ev_result", None)
+        p_win = float(getattr(ev, "p_win", 0.0) or 0.0) if ev is not None else 0.0
+        ev_net = float(getattr(ev, "ev_net_pct", 0.0) or 0.0) if ev is not None else 0.0
+        if score < float(threshold) + min_buffer:
+            return False, f"score={score:.1f} < thresh+buffer={float(threshold) + min_buffer:.1f}"
+        if quality < min_quality:
+            return False, f"setup_quality={quality:.1f} < {min_quality:.1f}"
+        if ev is None:
+            return False, "ev missing"
+        if p_win < min_pwin:
+            return False, f"p_win={p_win:.3f} < {min_pwin:.3f}"
+        if ev_net < min_ev:
+            return False, f"ev_net={ev_net:+.3f}% < {min_ev:+.3f}%"
+        return True, (
+            f"paper cohort exploration: score={score:.1f} quality={quality:.1f} "
+            f"p_win={p_win:.3f} ev_net={ev_net:+.3f}% open={open_count}/{max_open}"
+        )
+
+    def _paper_cohort_exploration_size_cap(self) -> float | None:
+        if not self._paper_validation_enabled():
+            return None
+        if not bool(self._paper_validation.get("cohort_exploration_enabled", False)):
+            return None
+        cap = self._paper_validation.get("cohort_exploration_max_total_scale", 0.25)
+        if cap is None:
+            return None
+        try:
+            return max(0.0, float(cap))
+        except (TypeError, ValueError):
+            return 0.25
 
     def _paper_ev_stress_tightening_active(self) -> bool:
         if not self._paper_validation_enabled() or not self._ev_gate_enabled():
@@ -1233,15 +1421,46 @@ class NinjaTrader:
         scan_interval = self._trading["scan_interval_seconds"]
         heartbeat_interval = self._safety.get("heartbeat_interval_seconds", 30)
         _cycle = 0
+        _consecutive_errors = 0
+        _max_consecutive_errors = int(self._safety.get("max_consecutive_errors", 5))
+        _circuit_breaker_until = 0.0
 
         while self._running:
             try:
                 tick_start = time.time()
                 _cycle += 1
 
+                # ── Circuit breaker: pause if too many consecutive errors ─
+                if _circuit_breaker_until > time.time():
+                    remaining = int(_circuit_breaker_until - time.time())
+                    log.warning(
+                        "Circuit breaker active — %ds remaining (consecutive errors: %d)",
+                        remaining, _consecutive_errors,
+                    )
+                    await asyncio.sleep(min(remaining, 30))
+                    continue
+                if _circuit_breaker_until > 0 and _circuit_breaker_until <= time.time():
+                    log.info("Circuit breaker cleared — resuming normal operations")
+                    _circuit_breaker_until = 0.0
+                    _consecutive_errors = 0
+
                 # ── Heartbeat ─────────────────────────────────────────────
                 if time.time() - self._heartbeat_ts > heartbeat_interval:
                     await self._heartbeat()
+
+                # ── Portfolio health check (professional CRO layer) ───────
+                should_reduce, reduce_reason = self._risk.should_reduce_exposure()
+                if should_reduce:
+                    log.warning("Portfolio health: %s — new entries will be sized down", reduce_reason)
+
+                risk_metrics = self._risk.get_risk_metrics()
+                if risk_metrics.sample_size >= 10:
+                    log.info(
+                        "Risk metrics: VaR95=%.2f%% CVaR95=%.2f%% Sharpe=%.2f Sortino=%.2f heat=%.1f%%",
+                        risk_metrics.var_95, risk_metrics.cvar_95,
+                        risk_metrics.sharpe_ratio, risk_metrics.sortino_ratio,
+                        self._risk.portfolio_heat_pct(),
+                    )
 
                 # ── Telegram hourly heartbeat ─────────────────────────────
                 tg_interval = self._cfg.get("telegram", {}).get("heartbeat_interval_minutes", 60) * 60
@@ -1558,6 +1777,19 @@ class NinjaTrader:
                                 funding_rate=_fr,
                             )
                             continue
+                    market_guard_ok, market_guard_reason = self._paper_market_context_guard_check(b)
+                    if not market_guard_ok:
+                        self._dataset_logger.log_no_trade(b, "paper_market_context_guard_blocked", snap=_snap)
+                        self._rej.log(
+                            stage="market_context_guard",
+                            reason=market_guard_reason,
+                            breakdown=b,
+                            threshold_required=_thresh,
+                            funding_rate=_fr,
+                        )
+                        if self._shadow:
+                            self._shadow.record_rejected(b, stage="market_context_guard")
+                        continue
                     exp_setup_ok, exp_setup_reason = self._paper_experimental_setup_stress_check(b)
                     if not exp_setup_ok:
                         self._dataset_logger.log_no_trade(b, "experimental_setup_stress_blocked", snap=_snap)
@@ -1594,17 +1826,30 @@ class NinjaTrader:
                         attribution_report=attribution_report,
                     )
                     if not cohort.allowed:
-                        log.info("Cohort policy blocked %s — %s", b.symbol, cohort.reason)
-                        self._dataset_logger.log_no_trade(b, "cohort_policy_blocked", snap=_snap)
-                        self._rej.log(
-                            stage="cohort_policy",
-                            reason=cohort.reason,
-                            breakdown=b, threshold_required=_thresh,
-                            funding_rate=_fr,
-                        )
-                        if self._shadow:
-                            self._shadow.record_rejected(b, stage="cohort_policy")
-                        continue
+                        cohort_explore_ok, cohort_explore_reason = self._paper_cohort_exploration_check(b, _thresh)
+                        if cohort_explore_ok:
+                            b.paper_cohort_exploration = True
+                            b.paper_cohort_exploration_reason = f"{cohort.reason}; {cohort_explore_reason}"
+                            log.info(
+                                "[%s] paper cohort exploration bypassed cohort block — %s",
+                                b.symbol,
+                                b.paper_cohort_exploration_reason,
+                            )
+                        else:
+                            log.info("Cohort policy blocked %s — %s", b.symbol, cohort.reason)
+                            self._dataset_logger.log_no_trade(b, "cohort_policy_blocked", snap=_snap)
+                            self._rej.log(
+                                stage="cohort_policy",
+                                reason=cohort.reason,
+                                breakdown=b, threshold_required=_thresh,
+                                funding_rate=_fr,
+                            )
+                            if self._shadow:
+                                self._shadow.record_rejected(b, stage="cohort_policy")
+                            continue
+                    else:
+                        b.paper_cohort_exploration = False
+                        b.paper_cohort_exploration_reason = ""
                     edge = b.edge_result
                     edge_detector = self._scorer.edge_detector
                     if edge and edge.action == "BLOCK" and edge_detector.is_blocking:
@@ -1848,7 +2093,7 @@ class NinjaTrader:
                         open_trade_count=self._risk.state.open_trade_count,
                     )
                     if fm_decision.vetoed:
-                        log.warning("[%s] Jim VETOED: %s", bd.symbol, fm_decision.veto_reason)
+                        log.warning("[%s] Position VETOED: %s", bd.symbol, fm_decision.veto_reason)
                         self._rej.log(
                             stage="fm_veto", reason=fm_decision.veto_reason, breakdown=bd,
                             threshold_required=_bd_thresh,
@@ -1944,6 +2189,19 @@ class NinjaTrader:
                             total_scale,
                         )
                         total_scale = loss_cap
+                    cohort_exploration_cap = self._paper_cohort_exploration_size_cap()
+                    if (
+                        bool(getattr(bd, "paper_cohort_exploration", False))
+                        and cohort_exploration_cap is not None
+                        and total_scale > cohort_exploration_cap
+                    ):
+                        log.info(
+                            "[%s] paper cohort exploration size cap %.2fx applied (raw %.2fx)",
+                            bd.symbol,
+                            cohort_exploration_cap,
+                            total_scale,
+                        )
+                        total_scale = cohort_exploration_cap
                     if fm_decision.notes or ml_confidence > 1.0:
                         conf_note = f"Jim confidence {ml_confidence:.2f}x (p_win={_p_win:.0%})" if ml_confidence > 1.0 else ""
                         all_notes = ([conf_note] if conf_note else []) + fm_decision.notes
@@ -2094,6 +2352,13 @@ class NinjaTrader:
                         "time_series_score_mult": float(getattr(bd, "time_series_score_mult", 1.0) or 1.0),
                         "time_series_size_mult": float(getattr(bd, "time_series_size_mult", 1.0) or 1.0),
                         "time_series_reason": str(getattr(bd, "time_series_reason", "") or ""),
+                        # Short macro overlay diagnostics.
+                        "short_macro_state": str(getattr(bd, "short_macro_state", "neutral") or "neutral"),
+                        "short_macro_score": float(getattr(bd, "short_macro_score", 0.0) or 0.0),
+                        "short_macro_reason": str(getattr(bd, "short_macro_reason", "") or ""),
+                        "short_macro_score_mult": float(getattr(bd, "short_macro_score_mult", 1.0) or 1.0),
+                        "short_macro_size_mult": float(getattr(bd, "short_macro_size_mult", 1.0) or 1.0),
+                        "short_macro_threshold_shift": float(getattr(bd, "short_macro_threshold_shift", 0.0) or 0.0),
                         # Strategy sleeve + setup passport metadata for later attribution
                         "strategy_sleeve": bd.strategy_sleeve,
                         "strategy_reason": bd.strategy_reason,
@@ -2114,6 +2379,8 @@ class NinjaTrader:
                         "trend_bucket": ("weak" if bd.trend_strength < 40 else "moderate" if bd.trend_strength < 65 else "strong" if bd.trend_strength < 85 else "very_strong"),
                         "cohort_key": getattr(bd, "cohort_key", ""),
                         "lifecycle_status": getattr(bd, "lifecycle_status", "RESEARCH"),
+                        "paper_cohort_exploration": bool(getattr(bd, "paper_cohort_exploration", False)),
+                        "paper_cohort_exploration_reason": str(getattr(bd, "paper_cohort_exploration_reason", "") or ""),
                         # Phase D / Liq Sweep dedicated short-setup metadata
                         # (empty when the trade did not fire a dedicated detector).
                         "short_setup_label": _short_setup_label,
@@ -2138,6 +2405,32 @@ class NinjaTrader:
                             "[%s] rotation freed slot by closing %s @ %.4f",
                             bd.symbol, rotation_victim.symbol, rotation_price,
                         )
+
+                    # Spread guard: skip entry if bid-ask spread is too wide
+                    max_spread_pct = float(self._cfg.get("filters", {}).get("max_entry_spread_pct", 0.15) or 0.15)
+                    snap = snapshots.get(bd.symbol)
+                    if snap and getattr(snap, "order_book", None):
+                        ob = snap.order_book
+                        bids = ob.get("bids", [])
+                        asks = ob.get("asks", [])
+                        if bids and asks:
+                            best_bid = float(bids[0][0])
+                            best_ask = float(asks[0][0])
+                            mid = (best_bid + best_ask) / 2.0
+                            if mid > 0:
+                                spread_pct = (best_ask - best_bid) / mid * 100.0
+                                if spread_pct > max_spread_pct:
+                                    log.info("[%s] spread guard: %.3f%% > %.3f%% — skipping entry", bd.symbol, spread_pct, max_spread_pct)
+                                    self._pending_scores.pop(bd.symbol, None)
+                                    continue
+
+                    # Session block: skip entry during blocked sessions
+                    current_session = active_market_session_key().lower()
+                    blocked_sessions = {str(s).lower() for s in (self._cfg.get("filters", {}).get("blocked_sessions", []) or [])}
+                    if current_session in blocked_sessions:
+                        log.info("[%s] session block: %s — skipping entry", bd.symbol, current_session)
+                        self._pending_scores.pop(bd.symbol, None)
+                        continue
 
                     # CRITICAL: only notify + record if trade actually opened
                     opened = await self._trade_mgr.open(setup)
@@ -2168,6 +2461,11 @@ class NinjaTrader:
                 # ── Flush rejection forensics buffer ──────────────────────
                 self._rej.flush()
 
+                # ── Reset circuit breaker on successful cycle ─────────────
+                if _consecutive_errors > 0:
+                    log.info("Cycle recovered after %d consecutive errors", _consecutive_errors)
+                    _consecutive_errors = 0
+
                 # ── Sleep until next scan ─────────────────────────────────
                 elapsed = time.time() - tick_start
                 sleep_time = max(0.0, scan_interval - elapsed)
@@ -2178,6 +2476,23 @@ class NinjaTrader:
                 break
             except Exception as exc:
                 log.exception("Unhandled error in main loop: %s", exc)
+                _consecutive_errors += 1
+
+                # ── Circuit breaker: activate after repeated failures ────
+                if _consecutive_errors >= _max_consecutive_errors:
+                    # Exponential backoff: 30s, 60s, 120s, 300s (cap)
+                    backoff = min(300, 30 * (2 ** (_consecutive_errors - _max_consecutive_errors)))
+                    _circuit_breaker_until = time.time() + backoff
+                    log.error(
+                        "Circuit breaker ACTIVATED after %d consecutive errors — pausing %ds",
+                        _consecutive_errors, backoff,
+                    )
+                    await self._telegram.send_raw(
+                        f"🔴 *Circuit breaker activated*\n"
+                        f"Consecutive errors: {_consecutive_errors}\n"
+                        f"Pausing for {backoff}s to prevent cascade failure"
+                    )
+
                 # Classify: external connectivity vs bot bug
                 exc_str = str(exc)
                 exc_blob = f"{type(exc).__name__}: {exc_str}"
@@ -2846,6 +3161,8 @@ class NinjaTrader:
         tg_cfg = self._cfg.get("telegram", {}) or {}
         interval_minutes = float(tg_cfg.get("crypto_news_interval_minutes", 60) or 0)
         if interval_minutes <= 0:
+            return
+        if fetch_crypto_news_highlights is None or build_market_hot_narratives is None:
             return
         report_interval = interval_minutes * 60
         if time.time() - self._tg_crypto_news_ts < report_interval:

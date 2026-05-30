@@ -19,7 +19,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # ── Config ────────────────────────────────────────────────────────────────────
-BOT_DIR       = Path("/home/kiosarwin/ninja_trader")
+BOT_DIR       = Path(__file__).parent
 BOT_CMD       = [str(BOT_DIR / "venv/bin/python"), "-m", "src"]
 LOG_FILE      = BOT_DIR / "logs/futures_trader.log"
 WATCHDOG_LOG  = BOT_DIR / "logs/watchdog.log"

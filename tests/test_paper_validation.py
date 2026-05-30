@@ -601,6 +601,46 @@ def test_paper_trade_scope_allows_only_long_trending_expansion_by_default():
     assert sleeve_reason == "sleeve=neutral not in ['trend_following']"
 
 
+def test_paper_market_context_guard_blocks_negative_rotation_state():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._trading = {"mode": "paper"}
+    bot._paper_validation = {
+        "enabled": True,
+        "market_context_guard_enabled": True,
+        "blocked_market_rotation_states": ["alts_outperforming"],
+        "blocked_market_context_states": ["risk_on_alts|mania"],
+    }
+
+    blocked = SimpleNamespace(
+        market_context=SimpleNamespace(
+            rotation_state="alts_outperforming",
+            risk_on_state="risk_on_alts",
+        )
+    )
+    allowed = SimpleNamespace(
+        market_context=SimpleNamespace(
+            rotation_state="mixed_rotation",
+            risk_on_state="risk_off",
+        )
+    )
+    context_blocked = SimpleNamespace(
+        market_context=SimpleNamespace(
+            rotation_state="mania",
+            risk_on_state="risk_on_alts",
+        )
+    )
+
+    assert bot._paper_market_context_guard_check(allowed) == (True, "ok")
+    assert bot._paper_market_context_guard_check(blocked) == (
+        False,
+        "market_rotation_state=alts_outperforming blocked",
+    )
+    assert bot._paper_market_context_guard_check(context_blocked) == (
+        False,
+        "market_context=risk_on_alts|mania blocked",
+    )
+
+
 def test_paper_trade_scope_supports_direction_specific_sleeves():
     bot = NinjaTrader.__new__(NinjaTrader)
     bot._trading = {"mode": "paper"}
@@ -1035,6 +1075,189 @@ def test_score_many_soft_penalizes_low_probability_negative_ev_candidate():
     assert ranked[0].symbol == "GOOD/USDT:USDT"
 
 
+def test_loss_contributor_guard_penalizes_mixed_missing_rotation_probation():
+    scorer = Scorer.__new__(Scorer)
+    scorer._cfg = {
+        "loss_contributor_guard": {
+            "enabled": True,
+            "probation_sectors": ["depin", "commodity", "l1"],
+            "probation_symbols": ["GRASS"],
+        }
+    }
+    breakdown = SimpleNamespace(
+        symbol="GRASS/USDT:USDT",
+        direction="long",
+        market_context=SimpleNamespace(rotation_state="mixed_rotation"),
+        sector_rotation=SimpleNamespace(state="unknown", confidence=0.0),
+        setup_passport=SimpleNamespace(sector="depin"),
+        ev_result=SimpleNamespace(ev_net_pct=0.25),
+    )
+
+    score_mult, size_mult, threshold_shift, reason = scorer._loss_contributor_adjustment(breakdown)
+
+    assert score_mult == 0.8302
+    assert size_mult == 0.416
+    assert threshold_shift == 14.0
+    assert "mixed_rotation" in reason
+    assert "sector_rotation_missing" in reason
+    assert "probation=depin" in reason
+
+
+def test_short_macro_overlay_boosts_broad_crypto_unwind_short():
+    scorer = Scorer.__new__(Scorer)
+    scorer._cfg = {
+        "short_macro_overlay": {
+            "enabled": True,
+            "require_sector_confirmation_for_boost": True,
+            "min_sector_confidence": 0.35,
+        }
+    }
+    breakdown = SimpleNamespace(
+        direction="short",
+        setup_type="trend_continuation",
+        market_context=SimpleNamespace(
+            btc_trend="down",
+            btc_d_trend="down",
+            total_trend="down",
+            eth_btc_trend="flat",
+            risk_on_state="risk_off",
+            rotation_state="mixed_rotation",
+            confidence=0.8,
+        ),
+        sector_rotation=SimpleNamespace(state="rotating_out", confidence=0.7),
+    )
+
+    score_mult, size_mult, threshold_shift, state, macro_score, reason = scorer._short_macro_overlay_adjustment(breakdown)
+
+    assert state == "strong_broad_unwind"
+    assert macro_score == 8.5
+    assert score_mult == 1.06
+    assert size_mult == 1.08
+    assert threshold_shift == -2.0
+    assert "btc_down" in reason
+    assert "btc_d_down" in reason
+    assert "sector_rotating_out" in reason
+
+
+def test_short_macro_overlay_penalizes_risk_on_or_sector_hostile_short():
+    scorer = Scorer.__new__(Scorer)
+    scorer._cfg = {"short_macro_overlay": {"enabled": True}}
+    breakdown = SimpleNamespace(
+        direction="short",
+        setup_type="trend_continuation",
+        market_context=SimpleNamespace(
+            btc_trend="up",
+            btc_d_trend="down",
+            total_trend="up",
+            eth_btc_trend="up",
+            risk_on_state="risk_on_alts",
+            rotation_state="alts_outperforming",
+            confidence=0.8,
+        ),
+        sector_rotation=SimpleNamespace(state="rotating_in", confidence=0.8),
+    )
+
+    score_mult, size_mult, threshold_shift, state, macro_score, reason = scorer._short_macro_overlay_adjustment(breakdown)
+
+    assert state == "short_hostile"
+    assert macro_score < 0.0
+    assert score_mult == 0.92
+    assert size_mult == 0.75
+    assert threshold_shift == 4.0
+    assert "risk_on_alts" in reason
+    assert "sector_rotating_in" in reason
+
+
+def test_score_many_applies_short_macro_overlay_to_ranked_score_and_telemetry():
+    scorer = Scorer.__new__(Scorer)
+    scorer._cfg = {
+        "short_macro_overlay": {
+            "enabled": True,
+            "require_sector_confirmation_for_boost": True,
+        }
+    }
+    passport = SimpleNamespace(sector="ai")
+    scorer._strategy_router = SimpleNamespace(
+        classify_dispersion=lambda _rows: SimpleNamespace(value=20.0, state="normal"),
+        evaluate=lambda _bd, _disp: SimpleNamespace(
+            sleeve="trend_following",
+            score_mult=1.0,
+            size_mult=1.0,
+            threshold_shift=0.0,
+            ranking_bonus=0.0,
+            reason="trend sleeve",
+            setup_type="trend_continuation",
+            quality_score=76.0,
+            passport=passport,
+        ),
+    )
+    scorer._strategy_base_score = lambda bd, _sleeve: bd.legacy_score
+    scorer.score = lambda snap: snap
+    breakdown = SimpleNamespace(
+        symbol="ALT/USDT:USDT",
+        direction="short",
+        legacy_score=50.0,
+        base_score=50.0,
+        total_score=50.0,
+        volume_confirmation=65.0,
+        open_interest=62.0,
+        volatility=45.0,
+        strategy_sleeve="neutral",
+        strategy_reason="",
+        strategy_score_mult=1.0,
+        strategy_size_mult=1.0,
+        strategy_threshold_shift=0.0,
+        strategy_ranking_bonus=0.0,
+        dispersion_value=0.0,
+        dispersion_state="normal",
+        ev_result=None,
+        market_context=SimpleNamespace(
+            btc_trend="down",
+            btc_d_trend="down",
+            total_trend="down",
+            eth_btc_trend="flat",
+            risk_on_state="risk_off",
+            rotation_state="mixed_rotation",
+            confidence=0.8,
+        ),
+        sector_rotation=SimpleNamespace(state="rotating_out", confidence=0.7),
+    )
+
+    [rescored] = scorer.score_many({"ALT": breakdown})
+
+    assert rescored.short_macro_state == "strong_broad_unwind"
+    assert rescored.short_macro_score == 8.5
+    assert rescored.short_macro_score_mult == 1.06
+    assert rescored.short_macro_size_mult == 1.08
+    assert rescored.short_macro_threshold_shift == -2.0
+    assert rescored.strategy_score_mult == 1.06
+    assert rescored.strategy_size_mult == 1.08
+    assert rescored.strategy_threshold_shift == -2.0
+    assert rescored.total_score == 53.0
+    assert "short_macro=strong_broad_unwind" in rescored.strategy_reason
+
+
+def test_loss_contributor_guard_tightens_unsupported_negative_ev_short():
+    scorer = Scorer.__new__(Scorer)
+    scorer._cfg = {"loss_contributor_guard": {"enabled": True}}
+    breakdown = SimpleNamespace(
+        symbol="BTC/USDT:USDT",
+        direction="short",
+        market_context=SimpleNamespace(rotation_state="btc_outperforming"),
+        sector_rotation=SimpleNamespace(state="rotating_in", confidence=0.8),
+        setup_passport=SimpleNamespace(sector="btc"),
+        ev_result=SimpleNamespace(ev_net_pct=-0.01),
+    )
+
+    score_mult, size_mult, threshold_shift, reason = scorer._loss_contributor_adjustment(breakdown)
+
+    assert score_mult == 0.846
+    assert size_mult == 0.525
+    assert threshold_shift == 8.0
+    assert "short_ev<=0" in reason
+    assert "short_sector_rotation=rotating_in" in reason
+
+
 def test_start_clears_transient_persisted_kill_switch(monkeypatch):
     bot = NinjaTrader.__new__(NinjaTrader)
     bot._trading = {"mode": "paper"}
@@ -1291,12 +1514,16 @@ def test_paper_loss_streak_guard_blocks_weak_samples_without_cooldown():
         "loss_streak_guard_enabled": True,
         "loss_streak_guard_consecutive_losses": 2,
         "loss_streak_guard_daily_loss_pct": -2.0,
+        "loss_streak_guard_streak_daily_pnl_pct": 0.0,
+        "loss_streak_guard_streak_drawdown_pct": 2.0,
         "loss_streak_guard_min_score_buffer": 8.0,
         "loss_streak_guard_min_setup_quality": 68.0,
         "loss_streak_guard_min_p_win": 0.42,
         "loss_streak_guard_min_ev_net_pct": 0.0,
     }
-    bot._risk = SimpleNamespace(state=SimpleNamespace(daily_pnl_pct=-0.5, consecutive_losses=2))
+    bot._risk = SimpleNamespace(
+        state=SimpleNamespace(daily_pnl_pct=-0.5, drawdown_pct=0.5, consecutive_losses=2)
+    )
     weak = SimpleNamespace(
         total_score=57.0,
         setup_quality_score=67.0,
@@ -1308,6 +1535,33 @@ def test_paper_loss_streak_guard_blocks_weak_samples_without_cooldown():
     assert bot._paper_loss_streak_guard_active() is True
     assert allowed is False
     assert "loss-streak guard" in reason
+
+
+def test_paper_loss_streak_guard_ignores_stale_streak_on_green_healthy_day():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._trading = {"mode": "paper"}
+    bot._paper_validation = {
+        "enabled": True,
+        "loss_streak_guard_enabled": True,
+        "loss_streak_guard_consecutive_losses": 2,
+        "loss_streak_guard_daily_loss_pct": -2.0,
+        "loss_streak_guard_streak_daily_pnl_pct": 0.0,
+        "loss_streak_guard_streak_drawdown_pct": 2.0,
+        "loss_streak_guard_min_score_buffer": 8.0,
+        "loss_streak_guard_min_setup_quality": 68.0,
+    }
+    bot._risk = SimpleNamespace(
+        state=SimpleNamespace(daily_pnl_pct=2.7, drawdown_pct=1.2, consecutive_losses=2)
+    )
+    borderline = SimpleNamespace(
+        total_score=55.0,
+        setup_quality_score=63.0,
+        ev_result=SimpleNamespace(p_win=0.41, ev_net_pct=-0.01),
+    )
+
+    assert bot._paper_loss_streak_guard_active() is False
+    assert bot._paper_loss_streak_guard_check(borderline, 50.0) == (True, "ok")
+    assert bot._paper_loss_streak_size_cap() is None
 
 
 def test_paper_loss_streak_guard_allows_only_cleaner_samples_and_caps_size():
@@ -1333,6 +1587,104 @@ def test_paper_loss_streak_guard_allows_only_cleaner_samples_and_caps_size():
 
     assert bot._paper_loss_streak_guard_check(strong, 50.0) == (True, "ok")
     assert bot._paper_loss_streak_size_cap() == 0.35
+
+
+def _cohort_exploration_bot():
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._trading = {"mode": "paper"}
+    bot._paper_validation = {
+        "enabled": True,
+        "cohort_exploration_enabled": True,
+        "cohort_exploration_max_open": 1,
+        "cohort_exploration_max_total_scale": 0.25,
+        "cohort_exploration_min_score_buffer": 8.0,
+        "cohort_exploration_min_setup_quality": 68.0,
+        "cohort_exploration_min_p_win": 0.55,
+        "cohort_exploration_min_ev_net_pct": -0.25,
+        "cohort_exploration_stop_daily_loss_pct": -1.0,
+        "cohort_exploration_stop_consecutive_losses": 2,
+        "cohort_exploration_allowed_directions": ["long"],
+        "cohort_exploration_allowed_regimes": ["trending_expansion"],
+        "cohort_exploration_allowed_sleeves": ["trend_following"],
+        "cohort_exploration_allowed_setup_types": ["trend_continuation"],
+    }
+    bot._risk = SimpleNamespace(state=SimpleNamespace(daily_pnl_pct=0.0, consecutive_losses=0))
+    bot._trade_mgr = SimpleNamespace(open_trades=[])
+    return bot
+
+
+def _cohort_exploration_breakdown(**overrides):
+    data = {
+        "symbol": "XLM/USDT:USDT",
+        "direction": "long",
+        "regime": SimpleNamespace(value="trending_expansion"),
+        "strategy_sleeve": "trend_following",
+        "setup_type": "trend_continuation",
+        "total_score": 39.0,
+        "setup_quality_score": 70.0,
+        "ev_result": SimpleNamespace(p_win=0.58, ev_net_pct=-0.12),
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
+def test_paper_cohort_exploration_allows_tiny_high_quality_trend_sample():
+    bot = _cohort_exploration_bot()
+    breakdown = _cohort_exploration_breakdown()
+
+    allowed, reason = bot._paper_cohort_exploration_check(breakdown, 31.0)
+
+    assert allowed is True
+    assert "paper cohort exploration" in reason
+    assert bot._paper_cohort_exploration_size_cap() == 0.25
+
+
+def test_paper_cohort_exploration_blocks_neutral_low_quality_or_stress():
+    bot = _cohort_exploration_bot()
+
+    neutral = _cohort_exploration_breakdown(strategy_sleeve="neutral")
+    low_quality = _cohort_exploration_breakdown(setup_quality_score=67.0)
+    low_score = _cohort_exploration_breakdown(total_score=38.9)
+    bot._risk.state.daily_pnl_pct = -1.1
+    stressed = _cohort_exploration_breakdown()
+
+    assert bot._paper_cohort_exploration_check(neutral, 31.0)[0] is False
+    assert bot._paper_cohort_exploration_check(low_quality, 31.0)[0] is False
+    assert bot._paper_cohort_exploration_check(low_score, 31.0)[0] is False
+    assert bot._paper_cohort_exploration_check(stressed, 31.0)[0] is False
+
+
+def test_paper_cohort_exploration_counts_only_marked_open_trades():
+    bot = _cohort_exploration_bot()
+    normal = SimpleNamespace(setup=SimpleNamespace(setup_passport={}))
+    exploration = SimpleNamespace(
+        setup=SimpleNamespace(setup_passport={"paper_cohort_exploration": True})
+    )
+    bot._trade_mgr = SimpleNamespace(open_trades=[normal, exploration])
+
+    allowed, reason = bot._paper_cohort_exploration_check(
+        _cohort_exploration_breakdown(),
+        31.0,
+    )
+
+    assert bot._paper_cohort_exploration_open_count() == 1
+    assert allowed is False
+    assert "max_open" in reason
+
+
+def test_setup_passport_persists_paper_cohort_exploration_marker():
+    breakdown = SimpleNamespace(
+        setup_passport=None,
+        market_context=None,
+        sector_rotation=None,
+        paper_cohort_exploration=True,
+        paper_cohort_exploration_reason="cohort block; clean sample",
+    )
+
+    passport = main_module.setup_passport_with_market_context(breakdown)
+
+    assert passport["paper_cohort_exploration"] is True
+    assert passport["paper_cohort_exploration_reason"] == "cohort block; clean sample"
 
 
 def test_paper_experimental_setup_stress_blocks_unproven_continuation_on_bad_day():

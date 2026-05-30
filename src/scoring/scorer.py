@@ -7,16 +7,22 @@ Pipeline per symbol:
   3. Smart money phase detected — must have directional bias.
   4. EV model gate — EV must be positive after fees.
   5. Weighted signal score (unchanged from original for continuity).
+  6. Cross-sectional z-score normalization (professional upgrade).
+  7. Adaptive threshold based on regime and market context.
 
 Final score is regime-gated and smart-money-gated.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import math
+import statistics
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+
+from src.session_clock import active_market_session_key
 
 import pandas as pd
 
@@ -109,6 +115,12 @@ class SignalBreakdown:
     time_series_score_mult: float = 1.0
     time_series_size_mult: float = 1.0
     time_series_reason: str = ""
+    short_macro_state: str = "neutral"
+    short_macro_score: float = 0.0
+    short_macro_reason: str = ""
+    short_macro_score_mult: float = 1.0
+    short_macro_size_mult: float = 1.0
+    short_macro_threshold_shift: float = 0.0
     pre_gate_score: float = 0.0
     setup_type: str = "none"
     setup_quality_score: float = 0.0
@@ -220,6 +232,16 @@ class Scorer:
             trading_cfg.get("min_score_threshold", score_cfg.get("min_score_to_trade", 65))
         )
 
+        # Professional-grade: cross-sectional score normalization
+        # Tracks recent score distribution for z-score computation
+        self._score_history: collections.deque[float] = collections.deque(maxlen=200)
+        self._regime_score_history: dict[str, collections.deque[float]] = {
+            "trending_expansion": collections.deque(maxlen=100),
+            "accumulation_compression": collections.deque(maxlen=100),
+            "distribution": collections.deque(maxlen=100),
+            "chaos": collections.deque(maxlen=100),
+        }
+
     def _paper_soft_ev_allowed(self, ev_result: EVResult | None) -> bool:
         if ev_result is None or not self._paper_mode:
             return False
@@ -314,6 +336,88 @@ class Scorer:
     @staticmethod
     def _clamp_score(value: float) -> float:
         return round(min(100.0, max(0.0, value)), 2)
+
+    # ------------------------------------------------------------------ #
+    #  Professional: cross-sectional normalization & adaptive thresholds   #
+    # ------------------------------------------------------------------ #
+
+    def _record_score(self, score: float, regime: str = "") -> None:
+        """Record score for rolling distribution tracking."""
+        if not hasattr(self, "_score_history"):
+            self._score_history = collections.deque(maxlen=200)
+        if not hasattr(self, "_regime_score_history"):
+            self._regime_score_history = {}
+        self._score_history.append(score)
+        if regime in self._regime_score_history:
+            self._regime_score_history[regime].append(score)
+
+    def score_z_score(self, raw_score: float) -> float:
+        """Compute z-score of raw_score relative to recent score distribution.
+
+        This is how institutional quant desks normalize signals cross-sectionally:
+        a score of 65 means nothing in isolation — it only matters relative to
+        the current distribution of all scores.
+
+        Returns z-score in range [-3, +3].
+        """
+        history = getattr(self, "_score_history", None)
+        if history is None or len(history) < 10:
+            return 0.0  # not enough history
+        scores = list(history)
+        mean = statistics.mean(scores)
+        stdev = statistics.stdev(scores) if len(scores) >= 2 else 1.0
+        if stdev < 0.01:
+            return 0.0
+        z = (raw_score - mean) / stdev
+        return max(-3.0, min(3.0, z))
+
+    def adaptive_threshold(self, regime: str = "", market_ctx: object | None = None) -> float:
+        """Compute adaptive score threshold based on regime and market conditions.
+
+        Professional behavior:
+        - Trending expansion: lower threshold (more opportunities)
+        - Distribution/chaos: higher threshold (be selective)
+        - High-confidence market context: slight relaxation
+        """
+        base = self._score_threshold
+
+        # Regime adjustment
+        regime_shifts = {
+            "trending_expansion": -3.0,       # more lenient in trends
+            "accumulation_compression": 0.0,  # standard
+            "distribution": 5.0,              # more selective
+            "chaos": 10.0,                    # very selective
+        }
+        regime_shift = regime_shifts.get(regime, 0.0)
+
+        # Market context adjustment
+        ctx_shift = 0.0
+        if market_ctx is not None:
+            confidence = float(getattr(market_ctx, "confidence", 0.0) or 0.0)
+            if confidence > 0.7:
+                ctx_shift -= 1.5  # high-confidence context relaxes threshold
+            elif confidence < 0.3:
+                ctx_shift += 2.0  # low-confidence context tightens threshold
+
+        return max(30.0, min(80.0, base + regime_shift + ctx_shift))
+
+    def cross_sectional_rank_bonus(self, z: float) -> float:
+        """Convert z-score to a score bonus/penalty.
+
+        Top-decile signals (z > 1.5) get a bonus, bottom-decile (z < -1.0) get penalized.
+        This ensures the best relative signals get priority even if absolute scores are similar.
+        """
+        if z > 2.0:
+            return 4.0   # top ~2.5%
+        if z > 1.5:
+            return 2.5   # top ~7%
+        if z > 1.0:
+            return 1.0   # top ~16%
+        if z < -1.5:
+            return -3.0  # bottom ~7%
+        if z < -1.0:
+            return -1.5  # bottom ~16%
+        return 0.0
 
     def _directional_momentum_score(self, breakdown: SignalBreakdown) -> float:
         fv = breakdown.feature_vector
@@ -618,7 +722,7 @@ class Scorer:
 
         # ── Phase D / Liq Sweep dedicated short setup detector ─────────
         # These are the proven post-distribution short edges from
-        # `kiosarwin/Futures` (cohort: IMMINENT_DUMP + PHASE_D / LIQ_SWEEP).
+        # `quantedge` (cohort: IMMINENT_DUMP + PHASE_D / LIQ_SWEEP).
         # Detection runs only for short candidates and is purely informational
         # here — the StrategyRouter consumes `breakdown.short_setup` to decide
         # whether to admit the trade via the reversal sleeve.
@@ -725,7 +829,7 @@ class Scorer:
                 elif direction == "short" and four_h_bear:
                     raw_score *= 1.08   # 4H confirms short bias
                 elif direction == "long" and four_h_bear:
-                    raw_score *= 0.78   # counter-trend long — strong penalty
+                    raw_score *= 0.88   # counter-trend long — relaxed from 0.78; audit shows all trades in risk_off, longs need room
                 elif direction == "short" and four_h_bull:
                     raw_score *= 0.78   # counter-trend short — strong penalty
             except Exception:
@@ -789,6 +893,27 @@ class Scorer:
 
         final_total = round(min(100.0, max(0.0, raw_score)), 2)
 
+        # ── 6b. Cross-sectional normalization (professional upgrade) ───
+        # Record score and compute z-score relative to recent distribution.
+        # Top-decile signals get a ranking bonus; bottom-decile get penalized.
+        self._record_score(final_total, regime.value)
+        z = self.score_z_score(final_total)
+        cs_bonus = self.cross_sectional_rank_bonus(z)
+        if cs_bonus != 0.0:
+            final_total = round(min(100.0, max(0.0, final_total + cs_bonus)), 2)
+            log.debug(
+                "%s cross-sectional: z=%.2f bonus=%+.1f → score=%.1f",
+                snapshot.symbol, z, cs_bonus, final_total,
+            )
+
+        # ── 6c. Adaptive threshold (professional upgrade) ─────────────
+        # The threshold adapts to regime and market context — stricter in
+        # chaos/distribution, more lenient in trending expansion.
+        adaptive_thresh = self.adaptive_threshold(
+            regime=regime.value,
+            market_ctx=market_ctx,
+        )
+
         # ── 6. Edge Detector (observer-only by default) ───────────────
         edge_result = None
         try:
@@ -849,6 +974,203 @@ class Scorer:
             time_series_size_mult=ts_size_mult,
             time_series_reason=ts_reason,
             pre_gate_score=pre_gate_score,
+        )
+
+    def _loss_contributor_adjustment(self, bd: SignalBreakdown) -> tuple[float, float, float, str]:
+        guard = (getattr(self, "_cfg", {}) or {}).get("loss_contributor_guard", {}) or {}
+        if not bool(guard.get("enabled", False)):
+            return 1.0, 1.0, 0.0, ""
+
+        score_mult = 1.0
+        size_mult = 1.0
+        threshold_shift = 0.0
+        reasons: list[str] = []
+
+        market_ctx = getattr(bd, "market_context", None)
+        market_rotation = str(getattr(market_ctx, "rotation_state", "") or "unknown")
+        if market_rotation == "mixed_rotation":
+            score_mult *= float(guard.get("mixed_rotation_score_mult", 0.94) or 0.94)
+            size_mult *= float(guard.get("mixed_rotation_size_mult", 0.80) or 0.80)
+            threshold_shift += float(guard.get("mixed_rotation_threshold_shift", 5.0) or 5.0)
+            reasons.append("mixed_rotation")
+
+        btc_trend = str(getattr(market_ctx, "btc_trend", "") or "").lower()
+        if market_rotation == "alts_outperforming" and btc_trend == "down":
+            score_mult *= float(guard.get("alts_btc_down_score_mult", 0.85) or 0.85)
+            size_mult *= float(guard.get("alts_btc_down_size_mult", 0.50) or 0.50)
+            threshold_shift += float(guard.get("alts_btc_down_threshold_shift", 10.0) or 10.0)
+            reasons.append("alts_btc_down")
+
+        rotation = getattr(bd, "sector_rotation", None)
+        rotation_state = str(getattr(rotation, "state", "") or "unknown")
+        rotation_conf = float(getattr(rotation, "confidence", 0.0) or 0.0)
+        rotation_missing = rotation is None or rotation_state in {"", "unknown"} or rotation_conf <= 0.0
+        if rotation_missing:
+            score_mult *= float(guard.get("missing_sector_rotation_score_mult", 0.96) or 0.96)
+            size_mult *= float(guard.get("missing_sector_rotation_size_mult", 0.80) or 0.80)
+            threshold_shift += float(guard.get("missing_sector_rotation_threshold_shift", 3.0) or 3.0)
+            reasons.append("sector_rotation_missing")
+
+        passport = getattr(bd, "setup_passport", None)
+        sector = str(getattr(passport, "sector", "") or sector_for_asset(asset_from_symbol(bd.symbol)))
+        symbol = str(getattr(bd, "symbol", "") or "")
+        asset = asset_from_symbol(symbol)
+        probation_sectors = {str(x) for x in guard.get("probation_sectors", []) or []}
+        probation_symbols = {str(x) for x in guard.get("probation_symbols", []) or []}
+        if sector in probation_sectors or symbol in probation_symbols or asset in probation_symbols:
+            score_mult *= float(guard.get("probation_score_mult", 0.92) or 0.92)
+            size_mult *= float(guard.get("probation_size_mult", 0.65) or 0.65)
+            threshold_shift += float(guard.get("probation_threshold_shift", 6.0) or 6.0)
+            reasons.append(f"probation={sector or asset}")
+
+        session = active_market_session_key().lower()
+        session_penalties = guard.get("session_penalties", {}) or {}
+        if session and session in session_penalties:
+            sp = session_penalties[session]
+            score_mult *= float(sp.get("score_mult", 1.0) or 1.0)
+            size_mult *= float(sp.get("size_mult", 1.0) or 1.0)
+            threshold_shift += float(sp.get("threshold_shift", 0.0) or 0.0)
+            reasons.append(f"session={session}")
+
+        if str(getattr(bd, "direction", "") or "").lower() == "short":
+            ev = getattr(bd, "ev_result", None)
+            ev_net = float(getattr(ev, "ev_net_pct", 0.0) or 0.0) if ev is not None else 0.0
+            if ev_net <= 0.0:
+                score_mult *= float(guard.get("short_nonpositive_ev_score_mult", 0.90) or 0.90)
+                size_mult *= float(guard.get("short_nonpositive_ev_size_mult", 0.70) or 0.70)
+                threshold_shift += float(guard.get("short_nonpositive_ev_threshold_shift", 4.0) or 4.0)
+                reasons.append("short_ev<=0")
+            if rotation is not None and rotation_conf > 0.0 and rotation_state not in {"rotating_out", "weakening"}:
+                score_mult *= float(guard.get("short_unsupported_rotation_score_mult", 0.94) or 0.94)
+                size_mult *= float(guard.get("short_unsupported_rotation_size_mult", 0.75) or 0.75)
+                threshold_shift += float(guard.get("short_unsupported_rotation_threshold_shift", 4.0) or 4.0)
+                reasons.append(f"short_sector_rotation={rotation_state}")
+
+        if not reasons:
+            return 1.0, 1.0, 0.0, ""
+        return (
+            round(max(0.50, min(1.0, score_mult)), 4),
+            round(max(0.35, min(1.0, size_mult)), 4),
+            round(threshold_shift, 2),
+            "loss_guard=" + "+".join(reasons),
+        )
+
+    def _short_macro_overlay_adjustment(
+        self,
+        bd: SignalBreakdown,
+    ) -> tuple[float, float, float, str, float, str]:
+        cfg = (getattr(self, "_cfg", {}) or {}).get("short_macro_overlay", {}) or {}
+        if not bool(cfg.get("enabled", False)):
+            return 1.0, 1.0, 0.0, "neutral", 0.0, ""
+        if str(getattr(bd, "direction", "") or "").lower() != "short":
+            return 1.0, 1.0, 0.0, "neutral", 0.0, ""
+
+        setup_type = str(getattr(bd, "setup_type", "") or "unknown")
+        boost_setups = set(
+            cfg.get(
+                "boost_setup_types",
+                ["trend_continuation", "liquidity_sweep_reversal", "compression_breakout"],
+            )
+            or []
+        )
+        can_boost = setup_type in boost_setups
+
+        market_ctx = getattr(bd, "market_context", None)
+        sector_rotation = getattr(bd, "sector_rotation", None)
+        if market_ctx is None:
+            return 1.0, 1.0, 0.0, "unknown", 0.0, "short_macro=market_context_missing"
+
+        btc = str(getattr(market_ctx, "btc_trend", "unknown") or "unknown")
+        btc_d = str(getattr(market_ctx, "btc_d_trend", "unknown") or "unknown")
+        total = str(getattr(market_ctx, "total_trend", "unknown") or "unknown")
+        eth_btc = str(getattr(market_ctx, "eth_btc_trend", "unknown") or "unknown")
+        risk = str(getattr(market_ctx, "risk_on_state", "unknown") or "unknown")
+        rotation = str(getattr(market_ctx, "rotation_state", "unknown") or "unknown")
+        market_conf = float(getattr(market_ctx, "confidence", 0.0) or 0.0)
+
+        sector_state = str(getattr(sector_rotation, "state", "unknown") or "unknown")
+        sector_conf = float(getattr(sector_rotation, "confidence", 0.0) or 0.0)
+        min_sector_conf = float(cfg.get("min_sector_confidence", 0.35) or 0.35)
+        require_sector = bool(cfg.get("require_sector_confirmation_for_boost", True))
+        sector_support = sector_state in {"rotating_out", "weakening"} and sector_conf >= min_sector_conf
+        sector_hostile = sector_state in {"rotating_in", "firming"} and sector_conf >= min_sector_conf
+
+        score = 0.0
+        reasons: list[str] = []
+        if btc == "down":
+            score += 2.0
+            reasons.append("btc_down")
+        elif btc == "up":
+            score -= 2.0
+            reasons.append("btc_up")
+        if btc_d == "down":
+            score += 1.5
+            reasons.append("btc_d_down")
+        elif btc_d == "up":
+            score += 0.5
+            reasons.append("btc_d_up_alt_underperformance")
+        if total == "down":
+            score += 1.5
+            reasons.append("total_down")
+        elif total == "up":
+            score -= 1.0
+            reasons.append("total_up")
+        if risk == "risk_off":
+            score += 1.0
+            reasons.append("risk_off")
+        elif risk in {"risk_on_alts", "risk_on_btc"}:
+            score -= 2.0
+            reasons.append(risk)
+        if eth_btc in {"down", "flat"}:
+            score += 0.5
+            reasons.append(f"eth_btc_{eth_btc}")
+        elif eth_btc == "up":
+            score -= 0.5
+            reasons.append("eth_btc_up")
+        if sector_support:
+            score += 2.0
+            reasons.append(f"sector_{sector_state}")
+        elif sector_hostile:
+            score -= 2.0
+            reasons.append(f"sector_{sector_state}")
+
+        broad_unwind = btc == "down" and btc_d == "down" and total in {"down", "flat", "unknown"} and risk in {"risk_off", "mixed"}
+        alt_underperformance = btc in {"down", "flat", "unknown"} and btc_d == "up" and sector_support
+        hostile = btc == "up" or risk in {"risk_on_alts", "risk_on_btc"} or sector_hostile
+
+        if can_boost and broad_unwind and (sector_support or not require_sector) and score >= 5.0:
+            state = "strong_broad_unwind"
+            score_mult = float(cfg.get("strong_score_mult", 1.06) or 1.06)
+            size_mult = float(cfg.get("strong_size_mult", 1.08) or 1.08)
+            threshold_shift = float(cfg.get("strong_threshold_shift", -2.0) or -2.0)
+        elif can_boost and (sector_support or alt_underperformance or (not require_sector and score >= 3.5)) and score >= 3.0:
+            state = "supportive_short"
+            score_mult = float(cfg.get("supportive_score_mult", 1.03) or 1.03)
+            size_mult = float(cfg.get("supportive_size_mult", 1.03) or 1.03)
+            threshold_shift = float(cfg.get("supportive_threshold_shift", -1.0) or -1.0)
+        elif hostile and score <= -1.0:
+            state = "short_hostile"
+            score_mult = float(cfg.get("hostile_score_mult", 0.92) or 0.92)
+            size_mult = float(cfg.get("hostile_size_mult", 0.75) or 0.75)
+            threshold_shift = float(cfg.get("hostile_threshold_shift", 4.0) or 4.0)
+        else:
+            state = "mixed_short" if market_conf > 0.0 else "unknown"
+            score_mult = 1.0
+            size_mult = 1.0
+            threshold_shift = 0.0
+
+        reason = "short_macro=" + state
+        if reasons:
+            reason += ":" + "+".join(reasons)
+        if not can_boost and state in {"strong_broad_unwind", "supportive_short"}:
+            reason += f"+setup_not_boosted={setup_type}"
+        return (
+            round(max(0.80, min(1.12, score_mult)), 4),
+            round(max(0.50, min(1.15, size_mult)), 4),
+            round(threshold_shift, 2),
+            state,
+            round(score, 2),
+            reason,
         )
 
     def _binance_alpha_risk_adjustment(self, bd: SignalBreakdown) -> tuple[float, float, str]:
@@ -913,6 +1235,32 @@ class Scorer:
                 bd.strategy_reason = f"{bd.strategy_reason}; {alpha_reason}" if bd.strategy_reason else alpha_reason
                 bd.strategy_score_mult = round(bd.strategy_score_mult * alpha_score_mult, 4)
                 bd.strategy_size_mult = round(bd.strategy_size_mult * alpha_size_mult, 4)
+            (
+                macro_score_mult,
+                macro_size_mult,
+                macro_threshold_shift,
+                macro_state,
+                macro_score,
+                macro_reason,
+            ) = self._short_macro_overlay_adjustment(bd)
+            bd.short_macro_state = macro_state
+            bd.short_macro_score = macro_score
+            bd.short_macro_reason = macro_reason
+            bd.short_macro_score_mult = macro_score_mult
+            bd.short_macro_size_mult = macro_size_mult
+            bd.short_macro_threshold_shift = macro_threshold_shift
+            if macro_reason:
+                bd.strategy_reason = f"{bd.strategy_reason}; {macro_reason}" if bd.strategy_reason else macro_reason
+            if macro_score_mult != 1.0 or macro_size_mult != 1.0 or macro_threshold_shift != 0.0:
+                bd.strategy_score_mult = round(bd.strategy_score_mult * macro_score_mult, 4)
+                bd.strategy_size_mult = round(bd.strategy_size_mult * macro_size_mult, 4)
+                bd.strategy_threshold_shift = round(bd.strategy_threshold_shift + macro_threshold_shift, 2)
+            loss_score_mult, loss_size_mult, loss_threshold_shift, loss_reason = self._loss_contributor_adjustment(bd)
+            if loss_reason:
+                bd.strategy_reason = f"{bd.strategy_reason}; {loss_reason}" if bd.strategy_reason else loss_reason
+                bd.strategy_score_mult = round(bd.strategy_score_mult * loss_score_mult, 4)
+                bd.strategy_size_mult = round(bd.strategy_size_mult * loss_size_mult, 4)
+                bd.strategy_threshold_shift = round(bd.strategy_threshold_shift + loss_threshold_shift, 2)
             bd.dispersion_value = dispersion.value
             bd.dispersion_state = dispersion.state
             bd.base_score = anchored_base

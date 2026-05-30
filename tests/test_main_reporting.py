@@ -321,3 +321,29 @@ def test_maybe_send_crypto_news_report_runs_on_independent_interval(monkeypatch)
     assert sent["report"][0][0].title == "BTC flow"
     assert sent["report"][1] == 60
     assert bot._tg_crypto_news_ts > 0
+
+
+def test_maybe_send_crypto_news_report_skips_when_helpers_missing(monkeypatch):
+    import asyncio
+
+    import src.main as main_module
+    from src.main import NinjaTrader
+
+    sent = {}
+
+    class _Telegram:
+        async def crypto_news_report(self, *args, **kwargs):
+            sent['called'] = True
+
+    monkeypatch.setattr(main_module, 'fetch_crypto_news_highlights', None)
+    monkeypatch.setattr(main_module, 'build_market_hot_narratives', None)
+
+    bot = NinjaTrader.__new__(NinjaTrader)
+    bot._cfg = {'telegram': {'crypto_news_interval_minutes': 60}}
+    bot._tg_crypto_news_ts = 0.0
+    bot._telegram = _Telegram()
+
+    asyncio.run(bot._maybe_send_crypto_news_report())
+
+    assert sent == {}
+    assert bot._tg_crypto_news_ts == 0.0

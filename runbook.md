@@ -12,7 +12,7 @@ Paper / live modes. Triple-gate trade filter: regime + smart money + EV.
 ## Quick Start
 
 ```bash
-cd /home/arwin/ninja_trader
+cd /path/to/quantedge
 source venv/bin/activate
 python -m src.main
 ```
@@ -40,7 +40,7 @@ warp-cli --accept-tos connect
 ### Python Environment
 
 ```bash
-cd /home/arwin/ninja_trader
+cd /path/to/quantedge
 python3.11 -m venv venv
 source venv/bin/activate
 pip install --upgrade pip

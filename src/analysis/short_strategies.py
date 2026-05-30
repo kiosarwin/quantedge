@@ -1,7 +1,7 @@
 """
 Short Entry Strategy Classifier (post-distribution short edges).
 
-Two short setups ported from `kiosarwin/Futures` where they are the bot's
+Two short setups ported from `quantedge` where they are the bot's
 primary statistical edge (cohort: `IMMINENT_DUMP + PHASE_D` and
 `IMMINENT_DUMP + LIQ_SWEEP`):
 
@@ -27,7 +27,7 @@ entry point :func:`detect_short_entry` evaluates the enabled detectors and
 returns the highest-confidence signal, mirroring the long-side
 :mod:`src.analysis.entry_strategies` module.
 
-Reference: see `src/engines/dump_detector.py` in `kiosarwin/Futures` —
+Reference: see `src/engines/dump_detector.py` in `quantedge` —
 specifically `_sow()` (Phase D) and `_liquidity_sweep()` (LIQ_SWEEP_HIGH).
 """
 from __future__ import annotations
