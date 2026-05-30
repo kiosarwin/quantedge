@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from src.utils.atomic_write import atomic_write
+
 from src.reporting.attribution import build_attribution_report
 
 if TYPE_CHECKING:
@@ -653,7 +655,7 @@ class FundManager:
     def _save(self) -> None:
         try:
             STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            STATE_PATH.write_text(json.dumps({
+            atomic_write(STATE_PATH, json.dumps({
                 "hit_milestones":       list(self._hit_milestones),
                 "monthly_start_equity": self._monthly_start_equity,
                 "monthly_start_ts":     self._monthly_start_ts,

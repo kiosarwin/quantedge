@@ -13,6 +13,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Optional
 
+from src.utils.atomic_write import atomic_write
+
 log = logging.getLogger(__name__)
 
 
@@ -129,7 +131,7 @@ class Learner:
             "trade_log": [asdict(t) for t in self._trade_log],
         }
         try:
-            self._save_path.write_text(json.dumps(state, indent=2))
+            atomic_write(self._save_path, json.dumps(state, indent=2))
         except Exception as exc:
             log.warning("Could not save learner state: %s", exc)
 

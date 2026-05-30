@@ -19,6 +19,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Awaitable
 
+from src.utils.atomic_write import atomic_write
+
 from src.data.client import BinanceFuturesClient
 from src.execution.executor import Executor
 from src.risk.risk_manager import RiskManager, TradeSetup
@@ -642,7 +644,7 @@ class TradeManager:
                 "trades": [self._serialize_trade(t) for t in self._trades.values()],
                 "updated_at": time.time(),
             }
-            self.STATE_PATH.write_text(json.dumps(payload))
+            atomic_write(self.STATE_PATH, json.dumps(payload))
         except Exception as exc:
             log.warning("Trade state save failed: %s", exc)
 

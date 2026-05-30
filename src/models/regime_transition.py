@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from collections import defaultdict
 from pathlib import Path
 
+from src.utils.atomic_write import atomic_write
 from src.session_clock import active_market_session_key
 
 log = logging.getLogger(__name__)
@@ -196,7 +197,7 @@ class RegimeTransitionMatrix:
                     for symbol, state in self._symbol_state.items()
                 },
             }
-            self.STATE_PATH.write_text(json.dumps(data, indent=2))
+            atomic_write(self.STATE_PATH, json.dumps(data, indent=2))
         except Exception as exc:
             log.warning("RegimeTransition save failed: %s", exc)
 

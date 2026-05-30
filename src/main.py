@@ -47,6 +47,7 @@ from src.models.adaptive_brain import AdaptiveBrain
 from src.risk.correlation_filter import CorrelationFilter
 from src.risk.session_modulator import SessionModulator
 from src.data.dataset_logger import DatasetLogger
+from src.utils.atomic_write import atomic_write
 try:
     from src.data.crypto_news import build_market_hot_narratives, fetch_crypto_news_highlights
 except Exception as exc:  # pragma: no cover - startup should stay alive without this feature
@@ -3390,7 +3391,7 @@ class NinjaTrader:
                 "attribution": attribution,
                 "lifecycle": lifecycle_report or self._lifecycle.build_report(self._learner._trade_log),
             }
-            Path("data/state.json").write_text(json.dumps(state))
+            atomic_write(Path("data/state.json"), json.dumps(state))
         except Exception:
             pass
 

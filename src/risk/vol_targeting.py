@@ -27,6 +27,8 @@ import time
 from collections import deque
 from pathlib import Path
 
+from src.utils.atomic_write import atomic_write
+
 log = logging.getLogger(__name__)
 
 
@@ -115,7 +117,7 @@ class VolTargeter:
                 "last_record_ts": self._last_record_ts,
                 "target": self._target,
             }
-            self.STATE_PATH.write_text(json.dumps(data, indent=2))
+            atomic_write(self.STATE_PATH, json.dumps(data, indent=2))
         except Exception as exc:
             log.warning("VolTargeter save failed: %s", exc)
 

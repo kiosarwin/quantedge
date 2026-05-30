@@ -23,6 +23,8 @@ import math
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.utils.atomic_write import atomic_write
+
 import numpy as np
 
 log = logging.getLogger(__name__)
@@ -161,7 +163,7 @@ class OnlineLogistic:
                 "loss_history": self._loss_history[-50:],
                 "feature_names": self.FEATURE_NAMES,
             }
-            self.STATE_PATH.write_text(json.dumps(data, indent=2))
+            atomic_write(self.STATE_PATH, json.dumps(data, indent=2))
         except Exception as exc:
             log.warning("OnlineLogistic save failed: %s", exc)
 

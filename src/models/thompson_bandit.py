@@ -24,6 +24,8 @@ import logging
 import random
 from pathlib import Path
 
+from src.utils.atomic_write import atomic_write
+
 log = logging.getLogger(__name__)
 
 
@@ -132,7 +134,7 @@ class ThompsonBandit:
     def _save(self) -> None:
         try:
             self.STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-            self.STATE_PATH.write_text(json.dumps(self._counts, indent=2))
+            atomic_write(self.STATE_PATH, json.dumps(self._counts, indent=2))
         except Exception as exc:
             log.warning("ThompsonBandit save failed: %s", exc)
 
