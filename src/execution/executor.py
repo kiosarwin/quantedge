@@ -73,6 +73,10 @@ class Executor:
             raise RuntimeError(
                 f"{setup.symbol}: entry order {order.get('id')} rejected or unconfirmed"
             )
+        # Track actual filled quantity for downstream SL/TP sizing
+        filled = float(order.get("filled", 0) or 0)
+        if filled > 0 and filled < amount:
+            order["actual_filled"] = filled
         log.info("Entry order confirmed: %s", order.get("id"))
         return order
 

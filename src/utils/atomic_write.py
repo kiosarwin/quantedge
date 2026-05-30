@@ -15,6 +15,8 @@ def atomic_write(path: Path, data: str) -> None:
     try:
         with os.fdopen(tmp_fd, 'w') as f:
             f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp_path, str(path))
     except BaseException:
         try:

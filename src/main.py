@@ -3391,6 +3391,7 @@ class NinjaTrader:
                 "attribution": attribution,
                 "lifecycle": lifecycle_report or self._lifecycle.build_report(self._learner._trade_log),
             }
+            Path("data").mkdir(parents=True, exist_ok=True)
             atomic_write(Path("data/state.json"), json.dumps(state))
         except Exception:
             pass

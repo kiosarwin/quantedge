@@ -201,6 +201,17 @@ class TradeManager:
             log.error("[%s] Entry order failed — no position opened: %s", setup.symbol, exc)
             return None
 
+        # Adjust position size if entry was only partially filled
+        actual_filled = entry_order.get("actual_filled")
+        if actual_filled is not None and actual_filled < setup.size_contracts:
+            ratio = actual_filled / setup.size_contracts
+            log.warning(
+                "[%s] Partial fill: %.6f / %.6f contracts (%.1f%%) — adjusting SL/TP size",
+                setup.symbol, actual_filled, setup.size_contracts, ratio * 100,
+            )
+            setup.size_contracts = actual_filled
+            setup.size_usd = setup.size_usd * ratio
+
         fill_price = float(entry_order.get("price", setup.entry_price) or setup.entry_price)
         if fill_price == 0:
             fill_price = setup.entry_price
