@@ -2,7 +2,7 @@
   "id": "FEAT-004",
   "type": "fix",
   "description": "H1: Fix Kelly fraction mislabeling and aggressive sizing. H2: Fix drawdown recovery to require equity reclamation not just time.",
-  "status": "in_progress",
+  "status": "completed",
   "steps": [
     "In src/risk/kelly_sizer.py: (a) The instance variable self._fraction (line: self._fraction = kelly_cfg.get('fraction', 0.30)) is semantically a 'fraction factor'. The comment says 'UPGRADED: 30% Kelly (was 25%)' but the audit wants true quarter-Kelly. Change the default from 0.30 to 0.25 (true quarter-Kelly). (b) Cap the confidence_scaling so that the effective kelly (fractional_kelly * vol_scalar * confidence_mult) never exceeds 0.30. After the line 'risk_pct = fractional_kelly * vol_scalar * confidence_mult', add a cap: if the effective fractional kelly exceeds 0.30, clamp it. Specifically, cap confidence_mult so that fractional_kelly * confidence_mult <= 0.30. (c) Rename any misleading references in comments from 'quarter-Kelly' to match the new semantics.",
     "In src/risk/risk_manager.py, modify PortfolioState.update_drawdown_state(): In the recovery mode section (when self.recovery_mode is True), the current code advances stage purely based on elapsed time (stage = min(3, int(elapsed / 3600))). Add an equity recovery check: require that equity has reclaimed at least 30% of the drawdown (measured from the point where recovery started) before advancing to the next stage. Keep the minimum 1 hour per stage (so both conditions must be met: time >= stage * 3600 AND equity recovery >= 30% * peak_drawdown for that stage). This requires storing recovery_start_equity on the PortfolioState dataclass."
@@ -21,5 +21,5 @@
     "grep -n 'recovery_start_equity' src/risk/risk_manager.py shows the new field"
   ],
   "blocked_reason": null,
-  "findings": ""
+  "findings": "All changes verified. 396 tests pass. Kelly default fraction reduced from 0.30 to 0.25, effective Kelly capped at 0.30 via confidence_mult adjustment, and drawdown recovery now requires both time (1hr per stage) AND equity reclamation (30% of drawdown per stage) before advancing stages. recovery_start_equity field added to PortfolioState dataclass."
 }
