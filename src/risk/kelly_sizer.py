@@ -129,6 +129,7 @@ class KellySizer:
             if fractional_kelly * vol_scalar * confidence_mult > max_effective_kelly:
                 confidence_mult = max_effective_kelly / (fractional_kelly * vol_scalar) if (fractional_kelly * vol_scalar) > 0 else 1.0
             risk_pct = fractional_kelly * vol_scalar * confidence_mult
+            risk_pct = min(risk_pct, 0.30)  # Defensive hard clamp: effective Kelly never exceeds 30%
             rationale = (
                 f"Kelly={kelly_raw:.3%}  ×{self._fraction}frac  ×{vol_scalar:.2f}vol"
                 f"  ×{confidence_mult:.2f}conf"

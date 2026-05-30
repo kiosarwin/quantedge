@@ -90,7 +90,7 @@ class OnlineLogistic:
     def __init__(self, learning_rate: float = 0.05, l2: float = 0.01):
         self._w = np.zeros(self.N_FEATURES)
         # Initialize bias slightly positive — most setups passing gates win > 50%
-        self._w[9] = 0.1
+        self._w[self.FEATURE_NAMES.index("bias")] = 0.1
         self._lr = learning_rate
         self._l2 = l2
         self._n_updates = 0

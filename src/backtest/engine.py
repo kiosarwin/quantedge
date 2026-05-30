@@ -229,6 +229,8 @@ class BacktestEngine:
                     open_trade.pnl_usd -= commission
                     equity += open_trade.pnl_usd
                     self._risk.on_trade_closed(open_trade.pnl_usd)
+                    # Include funding cost in per-trade PnL for reporting (already deducted from equity during trade)
+                    open_trade.pnl_usd -= open_trade.funding_cost
                     result.trades.append(open_trade)
                     result.equity_curve.append(equity)
                     open_trade = None
@@ -309,6 +311,8 @@ class BacktestEngine:
             open_trade.exit_reason = "end_of_data"
             open_trade.exit_bar = len(df) - 1
             equity += open_trade.pnl_usd
+            # Include funding cost in per-trade PnL for reporting (already deducted from equity during trade)
+            open_trade.pnl_usd -= open_trade.funding_cost
             result.trades.append(open_trade)
             result.equity_curve.append(equity)
 
