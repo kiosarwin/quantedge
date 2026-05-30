@@ -72,10 +72,12 @@ paper_validation:
   allowed_long_strategy_sleeves:
     - trend_following
     - compression_breakout           # Added: longs currently have 1 entry path; shorts have 3
+    - neutral                        # Allow neutral sleeve for paper sample collection
   allowed_short_strategy_sleeves:
     - trend_following
     - reversal
     - compression_breakout
+    - neutral                        # Allow neutral sleeve for paper sample collection
   max_open_trades_override: 5
   top_pairs_to_trade_override: 5
   threshold_relaxation: 22.0          # Increased from 15.0 for paper sample collection
