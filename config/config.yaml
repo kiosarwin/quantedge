@@ -20,7 +20,7 @@ trading:
   # Bot now imports cleanly; we widen sampling so lifecycle can collect samples.
   # Regime + smart-money gates remain active; EV is observed but not gating
   # until a durable edge is found.
-  min_score_threshold: 42          # Paper sample collection floor (-3 from previous 45)
+  min_score_threshold: 35          # Relaxed for paper + chaos penalty reform (was 42)
   max_open_trades: 2               # Two concurrent base; paper override widens further
   top_pairs_to_trade: 2
   scan_pool_size: 45               # Wider opportunity funnel; config-only universe expansion
@@ -29,9 +29,9 @@ trading:
   signal_confirmation_scans: 1     # Faster reaction for paper edge discovery
   signal_max_age_seconds: 300      # expire signal if not confirmed within 5 min
   regime_thresholds:               # Per-regime override of min_score_threshold
-    trending_expansion: 42          # Relaxed for paper sample collection (was 50)
-    accumulation_compression: 42   # Relaxed for paper sample collection (was 50)
-    distribution: 45               # Relaxed for paper sample collection (was 52)
+    trending_expansion: 35          # Relaxed + chaos penalty reform (was 42)
+    accumulation_compression: 35   # Relaxed + chaos penalty reform (was 42)
+    distribution: 38               # Relaxed + chaos penalty reform (was 45)
 
 # ── Paper Validation Throughput ──────────────────────────────────────────────
 # Purpose: collect enough samples in paper mode without weakening live-mode
@@ -79,7 +79,7 @@ paper_validation:
   max_open_trades_override: 5
   top_pairs_to_trade_override: 5
   threshold_relaxation: 22.0          # Increased from 15.0 for paper sample collection
-  min_score_floor: 28.0              # Lowered from 35.0 for paper sample collection
+  min_score_floor: 22.0              # Lowered from 28.0 + chaos penalty reform
   ev_hard_gate_min_trades: 40     # After this, EV relax is disabled; only positive EV passes
   ml_hard_gate_min_trades: 999
   ev_relax_score_buffer: 3.0

@@ -804,7 +804,7 @@ class Scorer:
 
         # Gate penalties: reduce score if institutional filters fail
         if not regime_ok:
-            raw_score *= 0.0    # chaos regime = no trade
+            raw_score *= 0.35   # chaos regime = heavy penalty but not zero (was 0.0)
         elif not smart_money_ok:
             raw_score *= 0.6    # heavy penalty; may still pass threshold
         elif not ev_ok:
